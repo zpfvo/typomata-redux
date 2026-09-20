@@ -44,7 +44,7 @@ class Counter(BaseStateMachine):
 
 
 class Logging(Middleware[Count, Actions]):
-    @intercept
+    @intercept(catch_exceptions=True)
     def log(self, event: Add, context: MiddlewareContext[Count, Actions]) -> None:
         assert_type(event, Add)
         assert_type(context.get_state(), Count)
@@ -92,13 +92,13 @@ def check() -> None:
 
 
 class Automatic(Middleware[Count, Actions]):
-    @intercept_pre
+    @intercept_pre(catch_exceptions=True)
     def before(self, action: Add, ctx: StoreAPI[Count, Actions]) -> None:
         assert_type(ctx.get_state(), Count)
         ctx.next(action)  # type: ignore[attr-defined]
         ctx.dispatch(Foreign())  # type: ignore[arg-type]
 
-    @intercept_post
+    @intercept_post()
     def after(self, action: Add, ctx: StoreAPI[Count, Actions]) -> None:
         ctx.dispatch(Ignore())
 

@@ -206,7 +206,8 @@ state/action vocabulary is no longer provided.
 - A reducer exception or a result rejected by the remaining runtime checks leaves
   the previous state installed.
   Errors after commit cannot roll state back. Middleware, reducer, and listener
-  exceptions propagate unchanged. A listener exception stops that notification pass.
+  exceptions propagate unchanged by default; annotated handlers can opt into recovery
+  as described below. A listener exception stops that notification pass.
 - `subscribe(listener)` returns an idempotent unsubscribe callback. Each successful
   reducer dispatch notifies a snapshot of listeners, including no-ops. Each separate
   registration is independent. Consumed actions do not notify on their own.
@@ -250,7 +251,7 @@ when a downstream handler consumes the action, and receives the original action
 seen by this middleware even if downstream replaces it. `get_state()` reads the
 current state, including changes from nested dispatches. A downstream exception
 (including a subscriber error after commit) skips post. A pre exception stops
-forwarding; a post exception propagates without rolling back committed state.
+forwarding by default; a post exception propagates without rolling back committed state.
 These hooks are not `finally` handlers.
 
 Keep `@intercept` with `MiddlewareContext` when you need manual forwarding,
@@ -260,6 +261,56 @@ conflict. Exact action conflicts fail during class creation; broader overlapping
 matches fail at dispatch **before any of that middleware's handlers run**.
 Use one decorator per method. Direct calls validate and invoke only that method;
 automatic forwarding belongs to the middleware chain, not the decorator wrapper.
+
+## Middleware exception handling
+
+All three decorators accept `catch_exceptions=True`; the default is `False`.
+Enable it for effects whose failure should allow dispatch to continue:
+
+```python
+from typomata_redux import CancelAction, MiddlewareError, intercept_pre
+
+class Audit(Middleware[Count, Add]):
+    @intercept_pre(catch_exceptions=True)
+    def before(self, action: Add, ctx: StoreAPI[Count, Add]) -> None:
+        print("dispatching", action)  # An ordinary effect failure is logged and recovered.
+```
+
+Recovery logs the exception with its traceback to `typomata_redux.middleware`.
+It ends the failing handler; it does not resume its remaining statements.
+
+| Handler | After recovering its own exception |
+| --- | --- |
+| `intercept_pre` | Forward normally, then run its post-handler if downstream succeeds. |
+| `intercept_post` | Return normally, allowing earlier middleware to unwind. |
+| `intercept` before calling `next` | Forward the original action once. |
+| `intercept` after calling `next` successfully | Return without forwarding again. |
+
+Returning normally from a manual handler without calling `next` still consumes
+an action, even with recovery enabled.
+
+**`raise CancelAction()` consumes the action and unwinds normally**, regardless
+of `catch_exceptions`. Earlier middleware's post-handlers still run. Cancellation
+in a pre-handler skips its own post-handler. Cancellation after `next` or in a
+post-handler cannot undo reduction or side effects that already happened.
+
+**`raise MiddlewareError("reason")` always propagates**, skips remaining
+post-handlers, and does not roll back committed state. Use `raise
+MiddlewareError("reason") from error` to preserve the underlying cause.
+
+Recovery covers ordinary `Exception` failures from the handler itself. Failures
+from `ctx.next`, `ctx.dispatch`, or `ctx.get_state` propagate, including reducer,
+subscriber, and nested-dispatch failures. Once a context call fails, any later
+exception in that invocation also propagates, even if the handler catches and
+translates the original error. Explicitly catching an error and returning normally
+remains possible. Use the supplied context for store calls so this boundary can
+be tracked.
+
+Library definition, dispatch, ambiguity, and return-contract errors are not
+recovered. `KeyboardInterrupt`, `SystemExit`, and other `BaseException` subclasses
+are not recovered either. Direct method calls (including `super()`) use ordinary
+Python exception behavior; recovery and cancellation handling belong to the chain.
+Plain middleware factories retain their own exception policy.
 
 ## Plain middleware
 

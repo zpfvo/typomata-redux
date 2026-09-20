@@ -1,22 +1,26 @@
 from __future__ import annotations
 
+import logging
 import sys
 from dataclasses import dataclass
 from functools import wraps
 from inspect import Parameter, Signature, isfunction, signature
-from typing import Any, Callable, Generic, Literal, TypeVar, cast, get_origin, get_type_hints
+from typing import Any, Callable, Generic, Literal, TypeVar, cast, get_origin, get_type_hints, overload
 
 from typing_extensions import ParamSpec, TypeAlias
 from typomata import BaseAction, BaseState
 
 from ._validation import classes, require, returns_none, synchronous
-from .errors import AmbiguousHandlerError, DefinitionError, DispatchError
+from .errors import AmbiguousHandlerError, CancelAction, DefinitionError, DispatchError, MiddlewareError
 
 S = TypeVar("S", bound=BaseState)
 A = TypeVar("A", bound=BaseAction)
 P = ParamSpec("P")
 Dispatch: TypeAlias = Callable[[A], None]
 _Phase = Literal["manual", "pre", "post"]
+_Outcome = Literal["returned", "recovered", "cancelled"]
+R = TypeVar("R")
+_logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -41,19 +45,61 @@ class MiddlewareContext(StoreAPI[S, A]):
 MiddlewareFactory: TypeAlias = Callable[[StoreAPI[S, A], Dispatch[A]], Dispatch[A]]
 
 
+@dataclass
+class _Invocation:
+    # One instance per selected handler, including recursive/reentrant dispatch.
+    # Never attach flags to exception objects or change the exception a caller sees.
+    failed_call: bool = False
+    active: bool = True
+
+    def protect(self, func: Callable[P, R]) -> Callable[P, R]:
+        def call(*args: P.args, **kwargs: P.kwargs) -> R:
+            try:
+                return func(*args, **kwargs)
+            except BaseException:
+                if self.active:
+                    self.failed_call = True
+                raise
+        return call
+
+
 @dataclass(frozen=True)
 class _Handler:
     actions: tuple[type, ...]
     original: Callable[..., None]
     name: str
     phase: _Phase
+    catch_exceptions: bool
 
-    def invoke(self, receiver: object, action: object, ctx: object) -> None:
+    def _validate(self, action: object, ctx: object) -> None:
         require(action, self.actions, self.name)
         expected = MiddlewareContext if self.phase == "manual" else StoreAPI
         if not isinstance(ctx, expected):
             raise TypeError(f"{self.name}: expected {expected.__name__}")
+
+    def invoke(self, receiver: object, action: object, ctx: object) -> None:
+        # Direct calls (including super()) keep ordinary Python exception behavior.
+        self._validate(action, ctx)
         returns_none(cast(Callable[..., object], self.original)(receiver, action, ctx), self.name)
+
+    def run(self, receiver: object, action: object, ctx: object, scope: _Invocation) -> _Outcome:
+        self._validate(action, ctx)
+        try:
+            result = cast(Callable[..., object], self.original)(receiver, action, ctx)
+        except CancelAction:
+            if scope.failed_call:
+                raise
+            return "cancelled"
+        except (MiddlewareError, DefinitionError, DispatchError, AmbiguousHandlerError):
+            raise
+        except Exception:
+            if not self.catch_exceptions or scope.failed_call:
+                raise
+            _logger.exception("Recovering from %s (%s) handling %s", self.name, self.phase, type(action).__qualname__)
+            return "recovered"
+        # Return-contract errors are infrastructure failures, not recoverable effects.
+        returns_none(result, self.name)
+        return "returned"
 
 
 @dataclass
@@ -62,6 +108,7 @@ class _Declaration:
     signature: Signature | None
     definitions: dict[type, _Handler]
     phase: _Phase
+    catch_exceptions: bool
 
 
 def _signature(func: object) -> Signature | None:
@@ -74,10 +121,10 @@ def _signature(func: object) -> Signature | None:
     return None
 
 
-def _decorate(func: Callable[P, None], phase: _Phase) -> Callable[P, None]:
+def _decorate(func: Callable[P, None], phase: _Phase, catch_exceptions: bool) -> Callable[P, None]:
     if _declaration(func) is not None:
         raise DefinitionError("Use one interceptor decorator per method")
-    declaration = _Declaration(func, _signature(func), {}, phase)
+    declaration = _Declaration(func, _signature(func), {}, phase, catch_exceptions)
 
     @wraps(func)
     def wrapper(*args: P.args, **kwargs: P.kwargs) -> None:
@@ -94,22 +141,86 @@ def _decorate(func: Callable[P, None], phase: _Phase) -> Callable[P, None]:
     return wrapper
 
 
-def intercept(func: Callable[P, None]) -> Callable[P, None]:
-    """Handle an action with explicit forwarding through MiddlewareContext.next."""
-    return _decorate(func, "manual")
+def _configure(
+    func: Callable[P, None] | None, phase: _Phase, catch_exceptions: bool,
+) -> Callable[P, None] | Callable[[Callable[P, None]], Callable[P, None]]:
+    if not isinstance(catch_exceptions, bool):
+        raise DefinitionError("catch_exceptions must be a bool")
+
+    def decorate(method: Callable[P, None]) -> Callable[P, None]:
+        return _decorate(method, phase, catch_exceptions)
+
+    return decorate if func is None else decorate(func)
 
 
-def intercept_pre(func: Callable[P, None]) -> Callable[P, None]:
-    """Run before automatically forwarding; context is StoreAPI, without next."""
-    return _decorate(func, "pre")
+@overload
+def intercept(func: Callable[P, None], *, catch_exceptions: bool = False) -> Callable[P, None]: ...
 
 
-def intercept_post(func: Callable[P, None]) -> Callable[P, None]:
+@overload
+def intercept(func: None = None, *, catch_exceptions: bool = False) -> Callable[[Callable[P, None]], Callable[P, None]]: ...
+
+
+def intercept(
+    func: Callable[P, None] | None = None, *, catch_exceptions: bool = False,
+) -> Callable[P, None] | Callable[[Callable[P, None]], Callable[P, None]]:
+    """Handle an action with explicit forwarding through MiddlewareContext.next.
+
+    Returning without next, or raising CancelAction, consumes the action and
+    returns normally to earlier middleware. Earlier post-handlers still run.
+    Consumption cannot undo forwarding, committed state, or previous effects.
+
+    catch_exceptions=True logs ordinary handler failures with a traceback. Before
+    next it then forwards the original action; after successful next it returns
+    without forwarding again. A successful handler that omits next still consumes.
+    Context-call failures and MiddlewareError always propagate. Default: False.
+    Recovery/cancellation handling applies to chain dispatch, not direct calls.
+    """
+    return _configure(func, "manual", catch_exceptions)
+
+
+@overload
+def intercept_pre(func: Callable[P, None], *, catch_exceptions: bool = False) -> Callable[P, None]: ...
+
+
+@overload
+def intercept_pre(func: None = None, *, catch_exceptions: bool = False) -> Callable[[Callable[P, None]], Callable[P, None]]: ...
+
+
+def intercept_pre(
+    func: Callable[P, None] | None = None, *, catch_exceptions: bool = False,
+) -> Callable[P, None] | Callable[[Callable[P, None]], Callable[P, None]]:
+    """Run before automatically forwarding; context is StoreAPI, without next.
+
+    catch_exceptions=True logs ordinary handler failures and forwards normally.
+    CancelAction consumes instead: skip downstream and this middleware's post
+    handler, but unwind normally to earlier middleware. Context-call failures and
+    MiddlewareError propagate. Default: False; direct calls do not recover.
+    """
+    return _configure(func, "pre", catch_exceptions)
+
+
+@overload
+def intercept_post(func: Callable[P, None], *, catch_exceptions: bool = False) -> Callable[P, None]: ...
+
+
+@overload
+def intercept_post(func: None = None, *, catch_exceptions: bool = False) -> Callable[[Callable[P, None]], Callable[P, None]]: ...
+
+
+def intercept_post(
+    func: Callable[P, None] | None = None, *, catch_exceptions: bool = False,
+) -> Callable[P, None] | Callable[[Callable[P, None]], Callable[P, None]]:
     """Run after downstream returns successfully, including consumed actions.
 
     Context is StoreAPI, without next. This is not a guarantee of reduction.
+    catch_exceptions=True logs ordinary handler failures and returns normally.
+    CancelAction also ends this handler normally; neither can undo downstream work.
+    Context-call failures and MiddlewareError propagate. Default: False;
+    direct calls do not recover.
     """
-    return _decorate(func, "post")
+    return _configure(func, "post", catch_exceptions)
+
 
 
 def _declaration(member: object) -> _Declaration | None:
@@ -139,11 +250,33 @@ def _resolve(owner: type, name: str, decl: _Declaration) -> _Handler:
         raise DefinitionError(f"{context}: context must be annotated {expected.__name__}[S, A]")
     if hints.get("return") is not type(None):
         raise DefinitionError(f"{context}: return annotation must be None")
-    return _Handler(actions, decl.original, context, decl.phase)
+    return _Handler(actions, decl.original, context, decl.phase, decl.catch_exceptions)
 
 
 class Middleware(Generic[S, A]):
-    """Action-selected handlers, composed in the store's declared order."""
+    """Action-selected handlers, composed in the store's declared order.
+
+    Consumption stops forwarding, not normal unwinding. For example::
+
+        Logging: pre
+          Validation: returns without calling next
+          (remaining middleware and reducer are skipped)
+        Logging: post
+
+    Post-handlers therefore do not prove that the action reached the reducer.
+    Once next has been called, consumption cannot roll back downstream work.
+
+    CancelAction expresses the same consumption behavior within any annotated
+    handler. In a pre-handler it also skips this middleware's own post-handler.
+    After next it only ends the current handler; downstream work is not undone.
+
+    Decorators default to catch_exceptions=False. Opting in catches and logs
+    ordinary handler-body failures. Context-call failures, invalid return values,
+    infrastructure errors, MiddlewareError, and BaseException subclasses propagate.
+    Once a context call fails, later errors in that invocation also propagate,
+    even if user code caught or translated the original error. Explicitly handling
+    an error and returning normally remains possible. No forwarding is retried.
+    """
 
     _handlers: tuple[_Handler, ...] = ()
 
@@ -191,29 +324,41 @@ class Middleware(Generic[S, A]):
                 raise AmbiguousHandlerError(
                     "Ambiguous middleware handlers: " + ", ".join(handler.name for handler in matches)
                 )
+            def run_automatic(handler: _Handler) -> _Outcome:
+                scope = _Invocation()
+                ctx = StoreAPI(scope.protect(api.get_state), scope.protect(api.dispatch))
+                try:
+                    return handler.run(self, action, ctx, scope)
+                finally:
+                    scope.active = False
+
             if not manual:
-                if pre:
-                    pre[0].invoke(self, action, api)
+                if pre and run_automatic(pre[0]) == "cancelled":
+                    return
                 next_dispatch(action)
                 if post:
-                    post[0].invoke(self, action, api)
+                    run_automatic(post[0])
                 return
-            active = True
+            scope = _Invocation()
             forwarded = False
 
             def next_once(replacement: A) -> None:
                 nonlocal forwarded
-                if not active:
+                if not scope.active:
                     raise DispatchError("next() cannot be called after its handler returns")
                 if forwarded:
                     raise DispatchError("next() can be called only once per handler")
                 forwarded = True
                 next_dispatch(replacement)
 
-            ctx = MiddlewareContext(api.get_state, api.dispatch, next_once)
+            ctx = MiddlewareContext(
+                scope.protect(api.get_state), scope.protect(api.dispatch), scope.protect(next_once),
+            )
             try:
-                manual[0].invoke(self, action, ctx)
+                outcome = manual[0].run(self, action, ctx, scope)
+                if outcome == "recovered" and not forwarded:
+                    ctx.next(action)
             finally:
-                active = False
+                scope.active = False
 
         return dispatch
