@@ -2,7 +2,7 @@
 
 
 class DefinitionError(TypeError):
-    """A handler or runtime vocabulary is not a supported declaration."""
+    """A handler or composition is not a supported declaration."""
 
 
 class AmbiguousHandlerError(ValueError):

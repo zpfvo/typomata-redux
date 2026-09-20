@@ -4,18 +4,19 @@ import sys
 from dataclasses import dataclass
 from functools import wraps
 from inspect import Parameter, Signature, isfunction, signature
-from typing import Any, Callable, Generic, TypeVar, cast, get_origin, get_type_hints
+from typing import Any, Callable, Generic, Literal, TypeVar, cast, get_origin, get_type_hints
 
 from typing_extensions import ParamSpec, TypeAlias
 from typomata import BaseAction, BaseState
 
-from ._validation import classes, compatible_inputs, require, returns_none, synchronous
+from ._validation import classes, require, returns_none, synchronous
 from .errors import AmbiguousHandlerError, DefinitionError, DispatchError
 
 S = TypeVar("S", bound=BaseState)
 A = TypeVar("A", bound=BaseAction)
 P = ParamSpec("P")
 Dispatch: TypeAlias = Callable[[A], None]
+_Phase = Literal["manual", "pre", "post"]
 
 
 @dataclass(frozen=True)
@@ -45,11 +46,13 @@ class _Handler:
     actions: tuple[type, ...]
     original: Callable[..., None]
     name: str
+    phase: _Phase
 
     def invoke(self, receiver: object, action: object, ctx: object) -> None:
         require(action, self.actions, self.name)
-        if not isinstance(ctx, MiddlewareContext):
-            raise TypeError(f"{self.name}: expected MiddlewareContext")
+        expected = MiddlewareContext if self.phase == "manual" else StoreAPI
+        if not isinstance(ctx, expected):
+            raise TypeError(f"{self.name}: expected {expected.__name__}")
         returns_none(cast(Callable[..., object], self.original)(receiver, action, ctx), self.name)
 
 
@@ -58,6 +61,7 @@ class _Declaration:
     original: Callable[..., None]
     signature: Signature | None
     definitions: dict[type, _Handler]
+    phase: _Phase
 
 
 def _signature(func: object) -> Signature | None:
@@ -70,9 +74,10 @@ def _signature(func: object) -> Signature | None:
     return None
 
 
-def intercept(func: Callable[P, None]) -> Callable[P, None]:
-    """Select a synchronous instance method by its action annotation."""
-    declaration = _Declaration(func, _signature(func), {})
+def _decorate(func: Callable[P, None], phase: _Phase) -> Callable[P, None]:
+    if _declaration(func) is not None:
+        raise DefinitionError("Use one interceptor decorator per method")
+    declaration = _Declaration(func, _signature(func), {}, phase)
 
     @wraps(func)
     def wrapper(*args: P.args, **kwargs: P.kwargs) -> None:
@@ -87,6 +92,24 @@ def intercept(func: Callable[P, None]) -> Callable[P, None]:
 
     setattr(wrapper, "__typomata_interceptor__", declaration)
     return wrapper
+
+
+def intercept(func: Callable[P, None]) -> Callable[P, None]:
+    """Handle an action with explicit forwarding through MiddlewareContext.next."""
+    return _decorate(func, "manual")
+
+
+def intercept_pre(func: Callable[P, None]) -> Callable[P, None]:
+    """Run before automatically forwarding; context is StoreAPI, without next."""
+    return _decorate(func, "pre")
+
+
+def intercept_post(func: Callable[P, None]) -> Callable[P, None]:
+    """Run after downstream returns successfully, including consumed actions.
+
+    Context is StoreAPI, without next. This is not a guarantee of reduction.
+    """
+    return _decorate(func, "post")
 
 
 def _declaration(member: object) -> _Declaration | None:
@@ -111,11 +134,12 @@ def _resolve(owner: type, name: str, decl: _Declaration) -> _Handler:
         raise DefinitionError(f"{context}: cannot resolve annotations: {error}") from error
     actions = classes(hints.get(parameters[1].name), BaseAction, context)
     ctx = hints.get(parameters[2].name)
-    if get_origin(ctx) is not MiddlewareContext:
-        raise DefinitionError(f"{context}: context must be annotated MiddlewareContext[S, A]")
+    expected = MiddlewareContext if decl.phase == "manual" else StoreAPI
+    if get_origin(ctx) is not expected:
+        raise DefinitionError(f"{context}: context must be annotated {expected.__name__}[S, A]")
     if hints.get("return") is not type(None):
         raise DefinitionError(f"{context}: return annotation must be None")
-    return _Handler(actions, decl.original, context)
+    return _Handler(actions, decl.original, context, decl.phase)
 
 
 class Middleware(Generic[S, A]):
@@ -131,7 +155,7 @@ class Middleware(Generic[S, A]):
                 members.setdefault(name, (owner, member))
         handlers = []
         seen: set[int] = set()
-        action_handlers: dict[type, _Handler] = {}
+        action_handlers: dict[type, list[_Handler]] = {}
         pending = []
         for name, (owner, member) in members.items():
             if isinstance(member, (staticmethod, classmethod, property)):
@@ -144,18 +168,15 @@ class Middleware(Generic[S, A]):
             seen.add(id(decl))
             handler = decl.definitions.get(owner) or _resolve(owner, name, decl)
             for action in handler.actions:
-                if action in action_handlers:
-                    raise DefinitionError(f"{cls.__qualname__}: duplicate interceptor for {action.__qualname__}")
-                action_handlers[action] = handler
+                previous = action_handlers.setdefault(action, [])
+                if any(item.phase == handler.phase or "manual" in (item.phase, handler.phase) for item in previous):
+                    raise DefinitionError(f"{cls.__qualname__}: conflicting interceptors for {action.__qualname__}")
+                previous.append(handler)
             pending.append((decl, owner, handler))
             handlers.append(handler)
         for decl, owner, handler in pending:
             decl.definitions[owner] = handler
         cls._handlers = tuple(handlers)
-
-    def _validate_actions(self, actions: tuple[type, ...]) -> None:
-        for handler in self._handlers:
-            compatible_inputs(handler.actions, actions, handler.name)
 
     def __call__(self, api: StoreAPI[S, A], next_dispatch: Dispatch[A]) -> Dispatch[A]:
         def dispatch(action: A) -> None:
@@ -163,10 +184,20 @@ class Middleware(Generic[S, A]):
             if not matches:
                 next_dispatch(action)
                 return
-            if len(matches) > 1:
+            manual = [handler for handler in matches if handler.phase == "manual"]
+            pre = [handler for handler in matches if handler.phase == "pre"]
+            post = [handler for handler in matches if handler.phase == "post"]
+            if len(manual) > 1 or len(pre) > 1 or len(post) > 1 or (manual and (pre or post)):
                 raise AmbiguousHandlerError(
                     "Ambiguous middleware handlers: " + ", ".join(handler.name for handler in matches)
                 )
+            if not manual:
+                if pre:
+                    pre[0].invoke(self, action, api)
+                next_dispatch(action)
+                if post:
+                    post[0].invoke(self, action, api)
+                return
             active = True
             forwarded = False
 
@@ -181,7 +212,7 @@ class Middleware(Generic[S, A]):
 
             ctx = MiddlewareContext(api.get_state, api.dispatch, next_once)
             try:
-                matches[0].invoke(self, action, ctx)
+                manual[0].invoke(self, action, ctx)
             finally:
                 active = False
 

@@ -1,5 +1,6 @@
 # Local upstream checkouts used for design research.
 /references/
+/experiments/
 /plan.md
 .venv/
 __pycache__/

@@ -1,10 +1,10 @@
 """Nested state, two slices, an effect middleware, and a full-chain follow-up."""
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 
 from typomata import BaseAction, BaseState, BaseStateMachine, transition
-from typomata_redux import MachineReducer, Middleware, MiddlewareContext, Store, intercept
+from typomata_redux import MachineReducer, Middleware, Store, StoreAPI, combine_reducers, intercept_pre, intercept_post
 
 
 @dataclass(frozen=True)
@@ -53,36 +53,32 @@ class Recorder(BaseStateMachine):
         return History((*state.values, action.value))
 
 
-counter = MachineReducer[Count, Actions](Counter(), states=Count, actions=Actions)
-recorder = MachineReducer[History, Actions](Recorder(), states=History, actions=Actions)
+counter = MachineReducer[Count](Counter())
+recorder = MachineReducer[History](Recorder())
 
 
-def reduce(state: AppState, action: Actions) -> AppState:
-    count = counter(state.count, action)
-    history = recorder(state.history, action)
-    if count is state.count and history is state.history:
-        return state
-    return replace(state, count=count, history=history)
+reduce = combine_reducers(AppState, count=counter, history=recorder)
 
 
 class Log(Middleware[AppState, Actions]):
-    @intercept
-    def log(self, action: Actions, ctx: MiddlewareContext[AppState, Actions]) -> None:
+    @intercept_pre
+    def before(self, action: Actions, ctx: StoreAPI[AppState, Actions]) -> None:
         print("before", type(action).__name__, ctx.get_state())
-        ctx.next(action)
+
+    @intercept_post
+    def after(self, action: Actions, ctx: StoreAPI[AppState, Actions]) -> None:
         print("after", type(action).__name__, ctx.get_state())
 
 
 class RecordChanges(Middleware[AppState, Actions]):
-    @intercept
-    def add(self, action: Add, ctx: MiddlewareContext[AppState, Actions]) -> None:
-        ctx.next(action)
+    @intercept_post
+    def add(self, action: Add, ctx: StoreAPI[AppState, Actions]) -> None:
         ctx.dispatch(Remember(ctx.get_state().count.value))
 
 
 def main() -> None:
     store = Store[AppState, Actions](
-        initial_state=AppState(), reducer=reduce, states=AppState, actions=Actions,
+        initial_state=AppState(), reducer=reduce,
         middleware=[Log(), RecordChanges()],
     )
     store.dispatch(Add(3))

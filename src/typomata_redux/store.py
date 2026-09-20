@@ -6,25 +6,26 @@ from typing import Callable, Generic, Iterable, TypeVar, cast
 
 from typomata import BaseAction, BaseState
 
-from ._validation import classes, require, returns_none, synchronous
+from ._validation import require, returns_none, synchronous
 from .errors import DispatchError
-from .middleware import Dispatch, Middleware, MiddlewareFactory, StoreAPI
+from .middleware import Dispatch, MiddlewareFactory, StoreAPI
 
 S = TypeVar("S", bound=BaseState)
 A = TypeVar("A", bound=BaseAction)
 
 
 class Store(Generic[S, A]):
-    """A synchronous store owned by the thread that constructed it."""
+    """A synchronous store owned by the thread that constructed it.
+
+    S and A are static contracts. Runtime checks enforce the base classes, not
+    the generic arguments; validate external data before creating actions.
+    """
 
     def __init__(
         self, *, initial_state: S, reducer: Callable[[S, A], S],
-        states: object, actions: object,
         middleware: Iterable[MiddlewareFactory[S, A]] = (),
     ) -> None:
-        self._states = classes(states, BaseState, "store states")
-        self._actions = classes(actions, BaseAction, "store actions")
-        require(initial_state, self._states, "initial state")
+        require(initial_state, (BaseState,), "initial state")
         synchronous(reducer, "reducer")
         self._state = initial_state
         self._reducer = reducer
@@ -37,8 +38,6 @@ class Store(Generic[S, A]):
         dispatch: Dispatch[A] = self._checked(self._reduce)
         for factory in reversed(factories):
             synchronous(factory, "middleware factory")
-            if isinstance(factory, Middleware):
-                factory._validate_actions(self._actions)
             handler = factory(api, dispatch)
             synchronous(handler, "middleware dispatch")
             dispatch = self._checked(handler)
@@ -56,7 +55,7 @@ class Store(Generic[S, A]):
             self._check_access()
             if not self._ready:
                 raise DispatchError("Cannot dispatch while constructing middleware")
-            require(action, self._actions, "dispatched action")
+            require(action, (BaseAction,), "dispatched action")
             returns_none(cast(Callable[[A], object], handler)(action), "middleware dispatch")
         return dispatch
 
@@ -76,7 +75,7 @@ class Store(Generic[S, A]):
             candidate = self._reducer(self._state, action)
             if inspect.iscoroutine(candidate):
                 candidate.close()
-            require(candidate, self._states, "reducer result")
+            require(candidate, (BaseState,), "reducer result")
             self._state = candidate
         finally:
             self._reducing = False

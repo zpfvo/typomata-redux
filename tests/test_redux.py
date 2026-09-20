@@ -53,13 +53,13 @@ class Counter(BaseStateMachine):
 
 
 def adapter(machine=None):
-    return MachineReducer[State, Actions](machine or Counter(), states=State, actions=Actions)
+    return MachineReducer[State](machine or Counter())
 
 
 def store(*middleware, reducer=None):
     return Store[State, Actions](
         initial_state=State(), reducer=reducer or adapter(),
-        states=State, actions=Actions, middleware=middleware,
+        middleware=middleware,
     )
 
 
@@ -144,7 +144,7 @@ class ReduxTests(unittest.TestCase):
     def test_invalid_action_rejected_before_middleware(self):
         events = []
         subject = store(Recording("log", events))
-        for action in (Foreign(), {}, None):
+        for action in ({}, None, 42):
             with self.subTest(action=action), self.assertRaises(TypeError):
                 subject.dispatch(action)
         self.assertEqual(events, [])
@@ -153,7 +153,7 @@ class ReduxTests(unittest.TestCase):
         class Bad(Middleware[State, Actions]):
             @intercept
             def handle(self, action: Add, ctx: Context) -> None:
-                ctx.next(Foreign())
+                ctx.next(object())
 
         events = []
         subject = store(Bad(), Recording("later", events))
@@ -356,14 +356,13 @@ class ReduxTests(unittest.TestCase):
                 def add(self, action: Add, ctx: Context) -> None:
                     pass
 
-    def test_middleware_unknown_vocabulary(self):
-        class Unknown(Middleware[State, Actions]):
-            @intercept
-            def handle(self, action: Foreign, ctx: Context) -> None:
-                pass
-
-        with self.assertRaises(DefinitionError):
-            store(Unknown())
+    def test_action_union_is_static_not_runtime_enforced(self):
+        # This call is rejected in the typing fixture, but generic arguments are
+        # not inspected at runtime. An unmatched BaseAction is an ordinary no-op.
+        subject = store()
+        old = subject.get_state()
+        subject.dispatch(Foreign())
+        self.assertIs(subject.get_state(), old)
 
     def test_union_annotated_subclass_and_renamed_keyword_parameters(self):
         seen = []
@@ -507,20 +506,24 @@ class ReduxTests(unittest.TestCase):
             subject.dispatch(Add())
         self.assertEqual(events, [])
 
-    def test_bad_schemas_and_initial_state(self):
-        with self.assertRaises(DefinitionError):
-            MachineReducer(Counter(), states=State, actions=Ignore)
-        with self.assertRaises(DefinitionError):
-            MachineReducer(Counter(), states=int, actions=Actions)
+    def test_removed_schema_arguments_and_bad_initial_state(self):
         with self.assertRaises(TypeError):
-            Store(initial_state=42, reducer=adapter(), states=State, actions=Actions)
+            MachineReducer[State](Counter(), states=State)
+        with self.assertRaises(TypeError):
+            MachineReducer[State](Counter(), actions=Actions)
+        with self.assertRaises(TypeError):
+            Store(initial_state=State(), reducer=adapter(), states=State)
+        with self.assertRaises(TypeError):
+            Store(initial_state=State(), reducer=adapter(), actions=Actions)
+        with self.assertRaises(TypeError):
+            Store(initial_state=42, reducer=adapter())
 
     def test_state_category_transition_and_unhandled_pair(self):
-        reducer = MachineReducer[State | Finished, Actions](
-            Finisher(), states=Annotated[State | Finished, "states"], actions=Actions,
+        reducer = MachineReducer[State | Finished](
+            Finisher(),
         )
         subject = Store[State | Finished, Actions](
-            initial_state=State(), reducer=reducer, states=State | Finished, actions=Actions,
+            initial_state=State(), reducer=reducer,
         )
         subject.dispatch(Add(3))
         old = subject.get_state()
@@ -528,9 +531,11 @@ class ReduxTests(unittest.TestCase):
         subject.dispatch(Add(8))
         self.assertIs(subject.get_state(), old)
 
-    def test_destination_outside_vocabulary_rejected(self):
-        with self.assertRaisesRegex(DefinitionError, "destination"):
-            MachineReducer(Finisher(), states=State, actions=Actions)
+    def test_state_variant_without_any_transition_is_a_noop(self):
+        reducer = MachineReducer[State | Finished](Counter())
+        old = Finished(4)
+        self.assertIs(reducer(old, Add()), old)
+        self.assertIs(reducer(old, Foreign()), old)
 
     def test_context_expires_when_middleware_raises(self):
         saved = []
