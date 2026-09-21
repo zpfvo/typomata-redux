@@ -262,6 +262,54 @@ matches fail at dispatch **before any of that middleware's handlers run**.
 Use one decorator per method. Direct calls validate and invoke only that method;
 automatic forwarding belongs to the middleware chain, not the decorator wrapper.
 
+## Passing dependencies to middleware
+
+Pass database connections, API clients, or other services through the middleware's
+constructor. Store them as typed instance attributes and use them in handlers.
+The context supplies store access; dependencies belong to the middleware instance.
+
+Building on the counter example above, this middleware accepts a SQLite connection:
+
+```python
+import sqlite3
+from typomata_redux import StoreAPI, intercept_post
+
+class SaveCount(Middleware[Count, Add]):
+    def __init__(self, database: sqlite3.Connection) -> None:
+        self.database = database
+
+    @intercept_post
+    def save(self, action: Add, ctx: StoreAPI[Count, Add]) -> None:
+        with self.database:
+            self.database.execute(
+                "INSERT INTO counts (value) VALUES (?)",
+                (ctx.get_state().value,),
+            )
+
+database = sqlite3.connect(":memory:")
+try:
+    database.execute("CREATE TABLE counts (value INTEGER NOT NULL)")
+    store = Store[Count, Add](
+        initial_state=Count(),
+        reducer=MachineReducer[Count](Counter()),
+        middleware=[SaveCount(database)],
+    )
+    store.dispatch(Add(2))
+    assert database.execute("SELECT value FROM counts").fetchall() == [(2,)]
+finally:
+    database.close()
+```
+
+The application creates and closes the connection; the store does not manage its
+lifetime. Multiple middleware instances can receive the same dependency. For tests,
+inject a test database, or annotate a service dependency with a `Protocol` and
+provide a fake implementation. Constructor injection preserves static typing
+without adding another generic parameter to the middleware context.
+
+This post-handler records the state observed after downstream returns, with the
+pre/post semantics described above. A database failure propagates by default;
+the store's already committed state is not rolled back.
+
 ## Middleware exception handling
 
 All three decorators accept `catch_exceptions=True`; the default is `False`.
