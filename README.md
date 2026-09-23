@@ -489,6 +489,55 @@ A plain reducer's result is checked as `BaseState`, not against the store's gene
 state union. Frozen dataclasses and immutable nested values are recommended;
 checks do not prove purity or deep immutability.
 
+### Sharing middleware type aliases
+
+Define the middleware base and context aliases once alongside your application's
+state and action types, then import them in middleware modules. This keeps handlers
+from repeatedly spelling out the state and action union. Building on the quick start:
+
+```python
+from typing import TypeAlias
+from typomata_redux import StoreAPI, intercept_post
+
+class NoOp(BaseAction):
+    pass
+
+CounterActions: TypeAlias = Add | NoOp
+CounterMiddleware: TypeAlias = Middleware[Count, CounterActions]
+CounterAPI: TypeAlias = StoreAPI[Count, CounterActions]
+CounterContext: TypeAlias = MiddlewareContext[Count, CounterActions]
+
+class ValidateAmount(CounterMiddleware):
+    @intercept
+    def validate(self, action: Add, ctx: CounterContext) -> None:
+        if action.amount <= 0:
+            return  # Consume this action.
+        ctx.next(action)
+
+class ReportCount(CounterMiddleware):
+    @intercept_post
+    def report(self, action: Add, ctx: CounterAPI) -> None:
+        print(ctx.get_state().value)  # Statically typed as int.
+
+counter_store = Store[Count, CounterActions](
+    initial_state=Count(),
+    reducer=MachineReducer[Count](Counter()),
+    middleware=[ValidateAmount(), ReportCount()],
+)
+counter_store.dispatch(Add(2))  # Prints 2.
+counter_store.dispatch(NoOp())  # No matching handlers; state stays unchanged.
+assert counter_store.get_state() == Count(2)
+```
+
+Use `CounterAPI` for pre/post handlers and `CounterContext` for manual handlers.
+Each handler can still select a narrow action such as `Add`, while context dispatch
+accepts the full `CounterActions` union. Subclassing the alias also leaves normal
+constructors and injected instance attributes available.
+
+These aliases reduce opportunities for inconsistent annotations; they do not add a
+new static guarantee. Both context aliases must still agree with `CounterMiddleware`,
+and a handler can still accidentally use a context alias from another application.
+
 ## Dispatch contract
 
 - `[First(), Second()]` runs First before Second, then reduces, commits state,
