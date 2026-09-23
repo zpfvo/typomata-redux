@@ -5,7 +5,6 @@ available; UV_CACHE_DIR can select a writable/cacheable dependency cache.
 """
 from __future__ import annotations
 
-import json
 import os
 from pathlib import Path
 import subprocess
@@ -17,7 +16,6 @@ import zipfile
 
 def main() -> None:
     project = Path(__file__).resolve().parents[1]
-    tool_bin = Path(sys.executable).parent
     environment = dict(os.environ)
     for key in ("PYTHONPATH", "MYPYPATH"):
         environment.pop(key, None)
@@ -61,15 +59,9 @@ def main() -> None:
         run(str(python), "-c", "import typomata_redux; assert 'site-packages' in typomata_redux.__file__", cwd=temp)
         run(str(python), "-m", "unittest", "discover", "-s", "tests", "-v", cwd=temp)
         run(str(python), "examples/counter.py", cwd=temp)
-        run(str(tool_bin / "mypy"), "--strict", "--untyped-calls-exclude=typomata",
-            "--python-version", "3.10", "--python-executable", str(python),
-            "--no-incremental", "tests/typing", cwd=temp)
-        config = temp / "pyrightconfig.json"
-        config.write_text(json.dumps({
-            "include": ["tests/typing"], "pythonVersion": "3.10",
-            "venvPath": str(temp), "venv": "venv",
-        }))
-        run(str(tool_bin / "pyright"), "--pythonpath", str(python), "--project", str(config), cwd=temp)
+        run(sys.executable, str(project / "scripts" / "verify_typing.py"),
+            "--fixtures", str(temp / "tests" / "typing"),
+            "--python-executable", str(python), cwd=temp)
         print("Built-artifact tests, example, typing marker, license, and consumer checks passed.")
 
 

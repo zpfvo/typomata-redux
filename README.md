@@ -468,6 +468,12 @@ Runtime action and return-value checks can also raise `TypeError`. See
 - Composition field names and heterogeneous reducer wiring remain runtime-checked.
 - Middleware handler action annotations determine routing. Their relation to the
   middleware/store's generic action union is not exhaustively checked at registration.
+- A handler's context annotation is not statically linked to its owning middleware.
+  For example, a handler in `Middleware[Count, Add]` can incorrectly declare
+  `StoreAPI[Profile, Add]` and still pass mypy and Pyright. The actual state is
+  `Count`; reading a Profile-only attribute will fail at runtime. Keep context
+  state/action arguments consistent with the middleware. Application-level context
+  aliases can reduce repetition, but do not enforce this relationship.
 
 Types are declared through generics and handler annotations, without separate
 `states=` or `actions=` configuration. Slice reducers accept `BaseAction`, so
@@ -535,14 +541,27 @@ From the project checkout after `uv sync`:
 uv run python -m unittest discover -s tests -v
 uv run mypy
 uv run pyright
+uv run python scripts/verify_typing.py
 uv run python examples/counter.py
 uv build
 uv run python scripts/verify_distribution.py
 ```
 
+`verify_typing.py` checks valid consumers and verifies negative cases independently
+with mypy and Pyright. It copies the fixtures to a temporary directory, removes
+both checkers' suppression comments, and checks each expected diagnostic by file,
+line, and code. Missing or unexpected diagnostics fail the check. Declaration,
+context, and store-wiring mistakes are covered alongside incorrect calls.
+
+Known middleware declaration gaps are kept in `tests/typing/known_gaps` and reported
+separately. A passing run does not claim those declarations are rejected. If either
+checker begins rejecting a known gap, the check fails so the fixture and documented
+limitation can be reviewed.
+
 The distribution verification builds wheels from source archives, runs tests and
-the example against an installed package, and checks a typed consumer with mypy
-and Pyright outside the source tree.
+the example against an installed package, and runs the same positive and negative
+typing checks outside the source tree against that installation. CI runs both
+source and installed-package checks.
 
 ## Migrating the earlier API
 
