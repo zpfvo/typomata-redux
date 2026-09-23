@@ -10,6 +10,7 @@ from typing import Any, Callable, Generic, Literal, TypeVar, cast, get_origin, g
 from typing_extensions import ParamSpec, TypeAlias
 from typomata import BaseAction, BaseState
 
+from ._metadata import InterceptorInfo, Phase
 from ._recovery import Invocation, protect
 from ._validation import classes, require, returns_none, synchronous
 from .errors import AmbiguousHandlerError, CancelAction, DefinitionError, DispatchError, MiddlewareError
@@ -18,7 +19,6 @@ S = TypeVar("S", bound=BaseState)
 A = TypeVar("A", bound=BaseAction)
 P = ParamSpec("P")
 Dispatch: TypeAlias = Callable[[A], None]
-_Phase = Literal["manual", "pre", "post"]
 _Outcome = Literal["returned", "recovered", "cancelled"]
 _logger = logging.getLogger(__name__)
 
@@ -47,22 +47,19 @@ MiddlewareFactory: TypeAlias = Callable[[StoreAPI[S, A], Dispatch[A]], Dispatch[
 
 @dataclass(frozen=True)
 class _Handler:
-    actions: tuple[type, ...]
+    info: InterceptorInfo
     original: Callable[..., None]
-    name: str
-    phase: _Phase
-    catch_exceptions: bool
 
     def _validate(self, action: object, ctx: object) -> None:
-        require(action, self.actions, self.name)
-        expected = MiddlewareContext if self.phase == "manual" else StoreAPI
+        require(action, self.info.actions, self.info.name)
+        expected = MiddlewareContext if self.info.phase == "manual" else StoreAPI
         if not isinstance(ctx, expected):
-            raise TypeError(f"{self.name}: expected {expected.__name__}")
+            raise TypeError(f"{self.info.name}: expected {expected.__name__}")
 
     def invoke(self, receiver: object, action: object, ctx: object) -> None:
         # Direct calls (including super()) keep ordinary Python exception behavior.
         self._validate(action, ctx)
-        returns_none(cast(Callable[..., object], self.original)(receiver, action, ctx), self.name)
+        returns_none(cast(Callable[..., object], self.original)(receiver, action, ctx), self.info.name)
 
     def run(self, receiver: object, action: object, ctx: object, scope: Invocation) -> _Outcome:
         self._validate(action, ctx)
@@ -75,12 +72,12 @@ class _Handler:
         except (MiddlewareError, DefinitionError, DispatchError, AmbiguousHandlerError):
             raise
         except Exception:
-            if not self.catch_exceptions or scope.failed_call:
+            if not self.info.catch_exceptions or scope.failed_call:
                 raise
-            _logger.exception("Recovering from %s (%s) handling %s", self.name, self.phase, type(action).__qualname__)
+            _logger.exception("Recovering from %s (%s) handling %s", self.info.name, self.info.phase, type(action).__qualname__)
             return "recovered"
         # Return-contract errors are infrastructure failures, not recoverable effects.
-        returns_none(result, self.name)
+        returns_none(result, self.info.name)
         return "returned"
 
 
@@ -89,7 +86,7 @@ class _Declaration:
     original: Callable[..., None]
     signature: Signature | None
     definitions: dict[type, _Handler]
-    phase: _Phase
+    phase: Phase
     catch_exceptions: bool
 
 
@@ -103,7 +100,7 @@ def _signature(func: object) -> Signature | None:
     return None
 
 
-def _decorate(func: Callable[P, None], phase: _Phase, catch_exceptions: bool) -> Callable[P, None]:
+def _decorate(func: Callable[P, None], phase: Phase, catch_exceptions: bool) -> Callable[P, None]:
     if _declaration(func) is not None:
         raise DefinitionError("Use one interceptor decorator per method")
     declaration = _Declaration(func, _signature(func), {}, phase, catch_exceptions)
@@ -124,7 +121,7 @@ def _decorate(func: Callable[P, None], phase: _Phase, catch_exceptions: bool) ->
 
 
 def _configure(
-    func: Callable[P, None] | None, phase: _Phase, catch_exceptions: bool,
+    func: Callable[P, None] | None, phase: Phase, catch_exceptions: bool,
 ) -> Callable[P, None] | Callable[[Callable[P, None]], Callable[P, None]]:
     if not isinstance(catch_exceptions, bool):
         raise DefinitionError("catch_exceptions must be a bool")
@@ -232,7 +229,9 @@ def _resolve(owner: type, name: str, decl: _Declaration) -> _Handler:
         raise DefinitionError(f"{context}: context must be annotated {expected.__name__}[S, A]")
     if hints.get("return") is not type(None):
         raise DefinitionError(f"{context}: return annotation must be None")
-    return _Handler(actions, decl.original, context, decl.phase, decl.catch_exceptions)
+    return _Handler(
+        InterceptorInfo(context, actions, decl.phase, decl.catch_exceptions), decl.original,
+    )
 
 
 class Middleware(Generic[S, A]):
@@ -285,9 +284,9 @@ class Middleware(Generic[S, A]):
                 continue
             seen.add(id(decl))
             handler = decl.definitions.get(owner) or _resolve(owner, name, decl)
-            for action in handler.actions:
+            for action in handler.info.actions:
                 previous = action_handlers.setdefault(action, [])
-                if any(item.phase == handler.phase or "manual" in (item.phase, handler.phase) for item in previous):
+                if any(item.info.phase == handler.info.phase or "manual" in (item.info.phase, handler.info.phase) for item in previous):
                     raise DefinitionError(f"{cls.__qualname__}: conflicting interceptors for {action.__qualname__}")
                 previous.append(handler)
             pending.append((decl, owner, handler))
@@ -298,16 +297,16 @@ class Middleware(Generic[S, A]):
 
     def __call__(self, api: StoreAPI[S, A], next_dispatch: Dispatch[A]) -> Dispatch[A]:
         def dispatch(action: A) -> None:
-            matches = [handler for handler in self._handlers if isinstance(action, handler.actions)]
+            matches = [handler for handler in self._handlers if isinstance(action, handler.info.actions)]
             if not matches:
                 next_dispatch(action)
                 return
-            manual = [handler for handler in matches if handler.phase == "manual"]
-            pre = [handler for handler in matches if handler.phase == "pre"]
-            post = [handler for handler in matches if handler.phase == "post"]
+            manual = [handler for handler in matches if handler.info.phase == "manual"]
+            pre = [handler for handler in matches if handler.info.phase == "pre"]
+            post = [handler for handler in matches if handler.info.phase == "post"]
             if len(manual) > 1 or len(pre) > 1 or len(post) > 1 or (manual and (pre or post)):
                 raise AmbiguousHandlerError(
-                    "Ambiguous middleware handlers: " + ", ".join(handler.name for handler in matches)
+                    "Ambiguous middleware handlers: " + ", ".join(handler.info.name for handler in matches)
                 )
             def run_automatic(handler: _Handler) -> _Outcome:
                 scope = Invocation()

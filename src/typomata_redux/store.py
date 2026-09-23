@@ -35,9 +35,9 @@ class Store(Generic[S, A]):
         self._ready = False
         self._listeners: dict[object, Callable[[], None]] = {}
         api = StoreAPI(self.get_state, self.dispatch)
-        factories = tuple(middleware)
+        self._middleware = tuple(middleware)
         dispatch: Dispatch[A] = self._checked(self._reduce)
-        for factory in reversed(factories):
+        for factory in reversed(self._middleware):
             synchronous(factory, "middleware factory")
             handler = factory(api, dispatch)
             synchronous(handler, "middleware dispatch")

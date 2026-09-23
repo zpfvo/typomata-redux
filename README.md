@@ -628,5 +628,9 @@ state/action vocabulary is no longer provided.
 
 This implementation adapts public `transition_map()` snapshots and invokes
 Typomata's decorated methods. It does not use private Typomata internals or modify
-Typomata. There are no diagrams yet; static action-handler diagrams are the final
-planned feature.
+Typomata. Internal inspection metadata now describes registered middleware handlers,
+reducer transitions, and nested composition using the same declarations as dispatch.
+It records plain callables and custom dispatch implementations as opaque; it does
+not execute handlers or predict their side effects. This metadata is internal and
+has no public API stability guarantee. There are no diagrams yet; static
+action-handler diagrams remain the final planned feature.

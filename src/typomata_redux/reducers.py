@@ -6,6 +6,7 @@ from typing import Any, Callable, Generic, TypeVar, cast, get_type_hints
 
 from typomata import BaseAction, BaseState, BaseStateMachine
 
+from ._metadata import TransitionInfo
 from ._validation import classes, compatible_inputs, require, synchronous
 from .errors import AmbiguousHandlerError, DefinitionError
 
@@ -14,11 +15,8 @@ S = TypeVar("S", bound=BaseState)
 
 @dataclass(frozen=True)
 class _Case:
-    sources: tuple[type, ...]
-    actions: tuple[type, ...]
-    destinations: tuple[type, ...]
+    info: TransitionInfo
     invoke: Callable[[BaseStateMachine, BaseState, BaseAction], BaseState]
-    name: str
 
 
 class MachineReducer(Generic[S]):
@@ -32,8 +30,11 @@ class MachineReducer(Generic[S]):
         self._machine = machine
         self._cases = tuple(
             _Case(
-                tuple(record["sources"]), tuple(record["actions"]),
-                tuple(record["destinations"]), record["func"], str(record["name"]),
+                TransitionInfo(
+                    name=str(record["name"]), sources=tuple(record["sources"]),
+                    actions=tuple(record["actions"]), destinations=tuple(record["destinations"]),
+                ),
+                record["func"],
             )
             for record in machine.transition_map()
         )
@@ -42,20 +43,20 @@ class MachineReducer(Generic[S]):
         # Composition can check existing declarations against a dataclass field
         # without requiring another user-supplied state schema.
         for case in self._cases:
-            compatible_inputs(case.sources, allowed, context)
-            if not all(any(issubclass(dest, state) for state in allowed) for dest in case.destinations):
+            compatible_inputs(case.info.sources, allowed, context)
+            if not all(any(issubclass(dest, state) for state in allowed) for dest in case.info.destinations):
                 raise DefinitionError(f"{context}: transition destination is outside the field state types")
 
     def __call__(self, state: S, action: BaseAction) -> S:
         require(state, (BaseState,), "reducer state")
         require(action, (BaseAction,), "reducer action")
         matches = [case for case in self._cases
-                   if isinstance(state, case.sources) and isinstance(action, case.actions)]
+                   if isinstance(state, case.info.sources) and isinstance(action, case.info.actions)]
         if not matches:
             return state
         if len(matches) > 1:
             raise AmbiguousHandlerError(
-                "Ambiguous reducer handlers: " + ", ".join(case.name for case in matches)
+                "Ambiguous reducer handlers: " + ", ".join(case.info.name for case in matches)
             )
         # Invoke the public decorated method: Typomata still owns result validation.
         result = matches[0].invoke(self._machine, state, action)
