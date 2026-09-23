@@ -1,10 +1,45 @@
 # Typomata Redux
 
-A first implementation of synchronous, typed Redux stores using
-[Typomata](../typomata) state machines as reducers. Middleware handlers are selected
-by action annotations. Side effects belong in middleware.
+Synchronous, typed Redux stores with [Typomata](../typomata) state machines as
+reducers. Describe state changes with annotated methods, compose them over nested
+state, and keep side effects in middleware.
 
-## Development
+This is an early implementation. The core API is ready to try in an application;
+compatibility with published Typomata releases still needs verification.
+
+- [Setup](#setup) and [quick start](#quick-start)
+- [Combining reducers](#combining-reducers)
+- [Choosing a middleware decorator](#choosing-a-middleware-decorator)
+- [Passing dependencies](#passing-dependencies-to-middleware)
+- [Exception handling](#middleware-exception-handling)
+- [Subscriptions](#subscriptions) and [async work](#async-work)
+- [API reference](#api-reference), [typing limits](#static-typing-boundaries), and [development](#development)
+
+## How the pieces fit
+
+An **action** is a `BaseAction` object describing what happened. **State** is a
+`BaseState` object; use immutable values so old state remains meaningful.
+A **reducer** takes state and an action and returns the next state without side
+effects. A **store** owns the current state and sends dispatched actions through
+its middleware to the reducer.
+
+Typomata selects reducer methods by **state type and action type**. Middleware
+selects methods by **action type only**; a handler reads any needed state through
+its context. An unhandled reducer action returns the same state object. An
+unhandled middleware action continues downstream.
+
+With `middleware=[First(), Second()]`, normal dispatch proceeds in this order:
+
+```text
+First pre → Second pre → reducer → commit state → subscribers
+                                                ↓
+First post ← Second post ←───────────────────────┘
+```
+
+Manual middleware controls forwarding explicitly. Consumption and exceptions can
+shorten this sequence; the sections below explain how post-handlers unwind.
+
+## Setup
 
 Requires Python 3.10+ and the reviewed Typomata checkout alongside this project:
 
@@ -16,12 +51,7 @@ python/
 
 ```bash
 uv sync
-uv run python -m unittest discover -s tests -v
-uv run mypy
-uv run pyright
 uv run python examples/counter.py
-uv build
-uv run python scripts/verify_distribution.py
 ```
 
 The uv source override installs the sibling Typomata checkout. Built distribution
@@ -29,7 +59,9 @@ metadata declares `typomata>=0.1.0`; compatibility with older published builds h
 not been verified. Install this package together with the reviewed Typomata build
 until that project's validated implementation is released.
 
-## Reducers and middleware
+## Quick start
+
+This complete example defines an action, state, reducer, and manual middleware:
 
 ```python
 from dataclasses import dataclass
@@ -65,47 +97,43 @@ store.dispatch(Add(2))  # Returns None.
 assert store.get_state() == Count(2)
 ```
 
-Types are declared through generics and handler annotations, with no separate
-`states=` or `actions=` configuration. `MachineReducer[Count]` returns `Count`;
-`Store[Count, Add]` exposes `get_state() -> Count` and `dispatch(action: Add) -> None`.
-State unions work too: `MachineReducer[Idle | Loading | Ready](DownloadMachine())`.
+The store's `dispatch` returns `None`; read the current state with `get_state()`.
+`ctx.next(action)` forwards to the next middleware or the reducer. Returning without
+calling it consumes the action, then earlier middleware resumes normally.
 
-Slice dispatch accepts `BaseAction`, calls a matching transition, or returns the
-identical state object. Each transition method keeps its precise state/action
-annotations, so slices need not import the application's full action union.
-Declare the allowed application actions on the store, for example
-`Store[AppState, Increment | Reset](...)`. Those generic arguments are static
-contracts; the library does not introspect them to enforce the unions at runtime.
-
-Runtime checks remain where existing information is sufficient: transition
-annotations, action/state base classes, dataclass field types, ambiguity, and
-middleware forwarding rules. Passing an unrelated `BaseAction` through untyped
-code is not rejected merely because it is outside the store's static action union.
-A plain reducer's result is checked as `BaseState`, not against the store's generic
-state union. Frozen dataclasses and immutable nested values are recommended;
-checks do not prove purity or deep immutability.
+Use `Store[State, ActionUnion]` for the application's action vocabulary. Individual
+handler annotations can stay narrow. State unions work too, for example
+`MachineReducer[Idle | Loading | Ready](DownloadMachine())`.
 
 The runnable [example](examples/counter.py) uses a nested root state and composed
 slice reducers. A plain `(state, action) -> state` function is also accepted.
 
 ## Combining reducers
 
-Use the root dataclass's field names to wire existing slice reducers:
+Use the root dataclass's field names to wire slice reducers. This extends the quick start with a root state containing a counter slice:
 
 ```python
 from typomata_redux import combine_reducers
 
+@dataclass(frozen=True)
+class AppState(BaseState):
+    count: Count = Count()
+    title: str = "Counter"
+
 reducer = combine_reducers(
     AppState,
-    count=counter,
-    history=recorder,
+    count=MachineReducer[Count](Counter()),
 )
+app = Store[AppState, Add](initial_state=AppState(), reducer=reducer)
+app.dispatch(Add(3))
+assert app.get_state().count == Count(3)
+assert app.get_state().title == "Counter"
 ```
 
-Here `counter` and `recorder` are the `MachineReducer` instances from the runnable
-example. Pass `reducer` directly to `Store`; no handwritten root reducer is needed.
-Each action goes to both children, with their own original slice state. The helper
-returns the identical root object if both slices are unchanged; otherwise it
+Pass the combined reducer directly to `Store`; no handwritten root reducer is
+needed. The [runnable example](examples/counter.py) composes two slices.
+Each action goes to every configured child, with their own original slice state. The helper
+returns the identical root object if all slices are unchanged; otherwise it
 rebuilds the dataclass once, sharing unchanged branches. Unconfigured constructor
 fields keep their values. Comparison uses identity, not equality.
 
@@ -153,75 +181,39 @@ the root is rebuilt. Required `InitVar` arguments need a custom root reducer.
 Reducers must remain pure; if a later child fails, the store does not commit the
 partially computed root, but it cannot undo in-place mutation or side effects.
 
-## Static typing boundaries
+## Choosing a middleware decorator
 
-- Store dispatch, middleware context dispatch, state access, and direct handler
-  calls retain precise static types. Run mypy or Pyright on application code.
-- `MachineReducer[S]` is a declaration by the caller: Typomata's `BaseStateMachine`
-  is not generic, so a checker cannot prove that all registered transitions stay
-  inside `S`. Use the union of possible slice states. Typomata checks each actual
-  transition result against its return annotation; composition additionally checks
-  declarations and results against the dataclass field type.
-- Composition field names and heterogeneous reducer wiring remain runtime-checked.
-  This simplification removes duplicate declarations, not these static limitations.
-- Middleware handler action annotations determine routing. Their relation to the
-  middleware/store's generic action union is not exhaustively checked at registration.
+| Decorator | Context | Forwarding | Typical use |
+| --- | --- | --- | --- |
+| `@intercept_pre` | `StoreAPI[S, A]` | Automatic after the handler | Run an effect before downstream handling. |
+| `@intercept_post` | `StoreAPI[S, A]` | Downstream runs first | React to an action using the resulting observable state. |
+| `@intercept` | `MiddlewareContext[S, A]` | Explicit `ctx.next(action)` | Consume or replace actions, or compare state around forwarding. |
 
-## Migrating the earlier API
+All contexts expose `get_state()` and `dispatch(action)`. Only manual handlers
+receive `next(action)`. Both dispatch methods return `None`:
 
-- `MachineReducer[S, A](machine, states=S, actions=A)` becomes `MachineReducer[S](machine)`.
-- `CombinedReducer[S, A](S, ...)` becomes `CombinedReducer[S](S, ...)`, or use `combine_reducers(S, ...)`.
-- `Store[S, A](..., states=S, actions=A)` becomes `Store[S, A](...)`.
-- Remove narrow-action routing adapters. Slice dispatch accepts `BaseAction` and
-  ignores unmatched actions; handler signatures remain narrow.
+- `next` continues through the remaining middleware and can be called once during
+  the current handler invocation.
+- `dispatch` starts a new synchronous dispatch through the whole chain, including
+  the current middleware. Dispatching the same action unconditionally can recurse.
 
-The old schema keywords are removed, not silently accepted. Initial state still
-comes from `initial_state`. Runtime enforcement of the store's exact generic
-state/action vocabulary is no longer provided.
+To compare state before and after downstream handling:
 
-## Dispatch contract
+```python
+class ObserveCount(Middleware[Count, Add]):
+    @intercept
+    def observe(self, action: Add, ctx: MiddlewareContext[Count, Add]) -> None:
+        previous = ctx.get_state()
+        ctx.next(action)
+        current = ctx.get_state()
+        if current is not previous:
+            print(previous.value, "->", current.value)
+```
 
-- `[First(), Second()]` runs First before Second, then reduces, commits state,
-  notifies subscribers, and returns through Second and First.
-- `ctx.next(action)` continues downstream. `ctx.dispatch(action)` starts a new
-  dispatch through the entire chain. Both return `None`.
-- No matching middleware method automatically forwards. A matching method may
-  forward a replacement action or consume the action by not forwarding.
-- An annotated handler's `next` is valid once, during that invocation. Additional
-  or delayed actions use `dispatch`. No batching or async dispatch API is provided.
-- Duplicate action registrations within one phase, or manual/automatic conflicts,
-  fail at class creation. Overlapping superclass
-  or union handlers raise `AmbiguousHandlerError` at dispatch. No name-order or
-  most-specific-match rule is applied. A broad logger belongs in its own middleware.
-- Handlers are synchronous instance methods with three required positional
-  parameters: receiver, action, and context (`MiddlewareContext[S, A]` for manual
-  handlers, `StoreAPI[S, A]` for automatic pre/post handlers); return annotation
-  is `None`. Parameter names may differ; positional-only parameters are supported.
-  Static/class methods, generators, async handlers, and unsupported annotations
-  are rejected. Postponed annotations resolve in module/declaring-class scope;
-  function-local forward references are not searched for automatically.
-- Inherited handlers and decorated overrides work. An undecorated override removes
-  the inherited registration. Direct calls preserve their static signatures and
-  validate action/result types; `super()` calls to registered parent methods work.
-- A reducer exception or a result rejected by the remaining runtime checks leaves
-  the previous state installed.
-  Errors after commit cannot roll state back. Middleware, reducer, and listener
-  exceptions propagate unchanged by default; annotated handlers can opt into recovery
-  as described below. A listener exception stops that notification pass.
-- `subscribe(listener)` returns an idempotent unsubscribe callback. Each successful
-  reducer dispatch notifies a snapshot of listeners, including no-ops. Each separate
-  registration is independent. Consumed actions do not notify on their own.
-- Nested dispatch is synchronous. Subscribers may see newer state after another
-  subscriber dispatches. Reducers cannot call back into their store. Dispatch during
-  middleware construction is rejected.
-- Store access belongs to its creating thread. Middleware can start async work
-  using application-owned tasks or workers, then dispatch completion actions on
-  that thread. Cancellation, shutdown, stale responses, and errors belong to that
-  middleware. The library starts no threads or event loops.
-
-Middleware context is per invocation and store bindings are per store. Reusing a
-middleware object does not overwrite its binding, but any mutable fields added to
-that object remain shared: use separate instances for independently owned effects.
+These are references to immutable state objects, not copies. The comparison
+includes any changes from downstream nested dispatches; it does not isolate one
+reducer invocation. A failed `next` skips the statements after it unless your code
+explicitly handles the exception.
 
 ## Automatic pre/post handlers
 
@@ -251,7 +243,8 @@ when a downstream handler consumes the action, and receives the original action
 seen by this middleware even if downstream replaces it. `get_state()` reads the
 current state, including changes from nested dispatches. A downstream exception
 (including a subscriber error after commit) skips post. A pre exception stops
-forwarding by default; a post exception propagates without rolling back committed state.
+forwarding by default; a post exception propagates without rolling back
+committed state.
 These hooks are not `finally` handlers.
 
 Keep `@intercept` with `MiddlewareContext` when you need manual forwarding,
@@ -360,6 +353,51 @@ are not recovered either. Direct method calls (including `super()`) use ordinary
 Python exception behavior; recovery and cancellation handling belong to the chain.
 Plain middleware factories retain their own exception policy.
 
+## Subscriptions
+
+Use middleware to react to specific actions. `subscribe` is optional and useful
+for consumers such as a UI that need notification after reducer dispatch,
+regardless of which action caused it.
+
+```python
+subscription_store = Store[Count, Add](
+    initial_state=Count(), reducer=MachineReducer[Count](Counter()),
+)
+
+def on_update() -> None:
+    print(subscription_store.get_state())
+
+unsubscribe = subscription_store.subscribe(on_update)
+subscription_store.dispatch(Add(1))  # Calls on_update after committing state.
+unsubscribe()                       # Safe to call more than once.
+```
+
+Listeners receive no arguments and return `None`. Registration does not invoke
+them immediately. Every successful reducer dispatch notifies listeners, even if
+the state object is unchanged. An action consumed before reaching the reducer
+does not notify them on its own.
+
+The store snapshots listeners for each notification pass. Changes to subscriptions
+during that pass affect later passes. A listener exception stops the current pass
+and propagates without rolling back state.
+
+There is no built-in slice subscription or previous-state argument. A listener can
+retain its previously observed value and compare it to `get_state()`. However, an
+earlier listener may synchronously dispatch again before it runs, so observed
+values are not guaranteed to represent every intermediate state.
+
+## Async work
+
+The store and handlers are synchronous. Start and manage async work in your
+middleware using your application's event loop or workers, then dispatch a
+completion action. The application owns task tracking, cancellation, error
+handling, and stale-result decisions.
+
+You may retain `ctx.dispatch` for later use. You may not retain `ctx.next` for
+later forwarding: it expires when the handler returns. All store access must
+happen on the thread that created the store. A worker must schedule its completion
+dispatch back onto that thread using the application's scheduling mechanism.
+
 ## Plain middleware
 
 For custom composition, a factory receives `(api, next_dispatch)` and returns a
@@ -380,6 +418,137 @@ order. Store boundaries check that actions inherit `BaseAction` and handlers ret
 `None`; they do not runtime-enforce the store's generic action union.
 The per-invocation one-call/lifetime guard is supplied by annotated `Middleware`;
 plain factories manage their own forwarding lifetimes.
+
+## API reference
+
+All names below are exported from `typomata_redux`. `S` denotes a state type and
+`A` an action type or union.
+
+| API | Purpose |
+| --- | --- |
+| `Store[S, A](initial_state=..., reducer=..., middleware=())` | Own state and assemble the middleware chain. |
+| `store.dispatch(action) -> None` | Dispatch synchronously through the entire chain. |
+| `store.get_state() -> S` | Read the current state object. |
+| `store.subscribe(listener) -> Callable[[], None]` | Register a no-argument listener and return an unsubscribe function. |
+| `MachineReducer[S](machine)` | Adapt Typomata transitions to a reducer accepting `BaseAction`. |
+| `combine_reducers(StateClass, field=reducer, ...)` | Infer the root type and compose dataclass slices. |
+| `CombinedReducer[S](StateClass, field=reducer, ...)` | Construct composition with an explicit root type. |
+| `Middleware[S, A]` | Base class for annotated middleware handlers. |
+| `StoreAPI[S, A]` | Context exposing `get_state` and `dispatch`. |
+| `MiddlewareContext[S, A]` | Context also exposing one-use `next`. |
+| `intercept`, `intercept_pre`, `intercept_post` | Register handlers; each accepts `catch_exceptions=False`. |
+| `Dispatch[A]`, `MiddlewareFactory[S, A]` | Callable aliases for custom middleware. |
+
+| Exception | Meaning |
+| --- | --- |
+| `CancelAction` | Raised by a handler to consume an action and unwind normally. |
+| `MiddlewareError` | Explicit failure that bypasses automatic recovery. |
+| `DefinitionError` | Invalid middleware or composition definition. |
+| `AmbiguousHandlerError` | Multiple handlers match where only one is allowed. |
+| `DispatchError` | Invalid store access or forwarding, such as a second `next` call. |
+
+Runtime action and return-value checks can also raise `TypeError`. See
+[exception handling](#middleware-exception-handling) for recovery boundaries.
+
+## Static typing boundaries
+
+- Store dispatch, middleware context dispatch, state access, and direct handler
+  calls retain precise static types. Run mypy or Pyright on application code.
+- `MachineReducer[S]` is a declaration by the caller: Typomata's `BaseStateMachine`
+  is not generic, so a checker cannot prove that all registered transitions stay
+  inside `S`. Use the union of possible slice states. Typomata checks each actual
+  transition result against its return annotation; composition additionally checks
+  declarations and results against the dataclass field type.
+- Composition field names and heterogeneous reducer wiring remain runtime-checked.
+- Middleware handler action annotations determine routing. Their relation to the
+  middleware/store's generic action union is not exhaustively checked at registration.
+
+Types are declared through generics and handler annotations, without separate
+`states=` or `actions=` configuration. Slice reducers accept `BaseAction`, so
+individual slices do not need to import the application's full action union.
+The store's generic parameters express static contracts rather than runtime
+validation of the exact union members.
+
+Runtime checks remain where existing information is sufficient: transition
+annotations, action/state base classes, dataclass field types, ambiguity, and
+middleware forwarding rules. Passing an unrelated `BaseAction` through untyped
+code is not rejected merely because it is outside the store's static action union.
+A plain reducer's result is checked as `BaseState`, not against the store's generic
+state union. Frozen dataclasses and immutable nested values are recommended;
+checks do not prove purity or deep immutability.
+
+## Dispatch contract
+
+- `[First(), Second()]` runs First before Second, then reduces, commits state,
+  notifies subscribers, and returns through Second and First.
+- `ctx.next(action)` continues downstream. `ctx.dispatch(action)` starts a new
+  dispatch through the entire chain. Both return `None`.
+- If no middleware handler matches, the action is forwarded automatically. A
+  matching manual handler may forward a replacement or consume by not forwarding.
+- An annotated handler's `next` is valid once, during that invocation. Additional
+  or delayed actions use `dispatch`. No batching or async dispatch API is provided.
+- Duplicate action registrations within one phase, or manual/automatic conflicts,
+  fail at class creation. Overlapping superclass
+  or union handlers raise `AmbiguousHandlerError` at dispatch. No name-order or
+  most-specific-match rule is applied. A broad logger belongs in its own middleware.
+- Handlers are synchronous instance methods with three required positional
+  parameters: receiver, action, and context (`MiddlewareContext[S, A]` for manual
+  handlers, `StoreAPI[S, A]` for automatic pre/post handlers); return annotation
+  is `None`. Parameter names may differ; positional-only parameters are supported.
+  Static/class methods, generators, async handlers, and unsupported annotations
+  are rejected. Postponed annotations resolve in module/declaring-class scope;
+  function-local forward references are not searched for automatically.
+- Inherited handlers and decorated overrides work. An undecorated override removes
+  the inherited registration. Direct calls preserve their static signatures and
+  validate action/result types; `super()` calls to registered parent methods work.
+- A reducer exception or a result rejected by the remaining runtime checks leaves
+  the previous state installed.
+  Errors after commit cannot roll state back. Middleware, reducer, and listener
+  exceptions propagate unchanged by default; annotated handlers can opt into recovery
+  as described below. A listener exception stops that notification pass.
+- `subscribe(listener)` returns an idempotent unsubscribe callback. Each successful
+  reducer dispatch notifies a snapshot of listeners, including no-ops. Each separate
+  registration is independent. Consumed actions do not notify on their own.
+- Nested dispatch is synchronous. Subscribers may see newer state after another
+  subscriber dispatches. Reducers cannot call back into their store. Dispatch during
+  middleware construction is rejected.
+- Store access belongs to its creating thread. Middleware can start async work
+  using application-owned tasks or workers, then dispatch completion actions on
+  that thread. Cancellation, shutdown, stale responses, and errors belong to that
+  middleware. The library starts no threads or event loops.
+
+Middleware context is per invocation and store bindings are per store. Reusing a
+middleware object does not overwrite its binding, but any mutable fields added to
+that object remain shared: use separate instances for independently owned effects.
+
+## Development
+
+From the project checkout after `uv sync`:
+
+```bash
+uv run python -m unittest discover -s tests -v
+uv run mypy
+uv run pyright
+uv run python examples/counter.py
+uv build
+uv run python scripts/verify_distribution.py
+```
+
+The distribution verification builds wheels from source archives, runs tests and
+the example against an installed package, and checks a typed consumer with mypy
+and Pyright outside the source tree.
+
+## Migrating the earlier API
+
+- `MachineReducer[S, A](machine, states=S, actions=A)` becomes `MachineReducer[S](machine)`.
+- `CombinedReducer[S, A](S, ...)` becomes `CombinedReducer[S](S, ...)`, or use `combine_reducers(S, ...)`.
+- `Store[S, A](..., states=S, actions=A)` becomes `Store[S, A](...)`.
+- Remove narrow-action routing adapters. Slice dispatch accepts `BaseAction` and
+  ignores unmatched actions; handler signatures remain narrow.
+
+The old schema keywords are removed, not silently accepted. Initial state still
+comes from `initial_state`. Runtime enforcement of the store's exact generic
+state/action vocabulary is no longer provided.
 
 ## Scope
 
