@@ -10,6 +10,7 @@ from typing import Any, Callable, Generic, Literal, TypeVar, cast, get_origin, g
 from typing_extensions import ParamSpec, TypeAlias
 from typomata import BaseAction, BaseState
 
+from ._recovery import Invocation, protect
 from ._validation import classes, require, returns_none, synchronous
 from .errors import AmbiguousHandlerError, CancelAction, DefinitionError, DispatchError, MiddlewareError
 
@@ -19,7 +20,6 @@ P = ParamSpec("P")
 Dispatch: TypeAlias = Callable[[A], None]
 _Phase = Literal["manual", "pre", "post"]
 _Outcome = Literal["returned", "recovered", "cancelled"]
-R = TypeVar("R")
 _logger = logging.getLogger(__name__)
 
 
@@ -45,24 +45,6 @@ class MiddlewareContext(StoreAPI[S, A]):
 MiddlewareFactory: TypeAlias = Callable[[StoreAPI[S, A], Dispatch[A]], Dispatch[A]]
 
 
-@dataclass
-class _Invocation:
-    # One instance per selected handler, including recursive/reentrant dispatch.
-    # Never attach flags to exception objects or change the exception a caller sees.
-    failed_call: bool = False
-    active: bool = True
-
-    def protect(self, func: Callable[P, R]) -> Callable[P, R]:
-        def call(*args: P.args, **kwargs: P.kwargs) -> R:
-            try:
-                return func(*args, **kwargs)
-            except BaseException:
-                if self.active:
-                    self.failed_call = True
-                raise
-        return call
-
-
 @dataclass(frozen=True)
 class _Handler:
     actions: tuple[type, ...]
@@ -82,7 +64,7 @@ class _Handler:
         self._validate(action, ctx)
         returns_none(cast(Callable[..., object], self.original)(receiver, action, ctx), self.name)
 
-    def run(self, receiver: object, action: object, ctx: object, scope: _Invocation) -> _Outcome:
+    def run(self, receiver: object, action: object, ctx: object, scope: Invocation) -> _Outcome:
         self._validate(action, ctx)
         try:
             result = cast(Callable[..., object], self.original)(receiver, action, ctx)
@@ -273,9 +255,12 @@ class Middleware(Generic[S, A]):
     Decorators default to catch_exceptions=False. Opting in catches and logs
     ordinary handler-body failures. Context-call failures, invalid return values,
     infrastructure errors, MiddlewareError, and BaseException subclasses propagate.
-    Once a context call fails, later errors in that invocation also propagate,
+    Store dispatch failures also propagate when using a retained callback or
+    calling a store directly. Failures belong to the currently calling handler.
+    Once a context/store call fails, later errors in that invocation also propagate,
     even if user code caught or translated the original error. Explicitly handling
-    an error and returning normally remains possible. No forwarding is retried.
+    an error and returning normally remains possible. Failures handled entirely
+    inside a nested dispatch do not affect its caller. No forwarding is retried.
     """
 
     _handlers: tuple[_Handler, ...] = ()
@@ -325,12 +310,10 @@ class Middleware(Generic[S, A]):
                     "Ambiguous middleware handlers: " + ", ".join(handler.name for handler in matches)
                 )
             def run_automatic(handler: _Handler) -> _Outcome:
-                scope = _Invocation()
-                ctx = StoreAPI(scope.protect(api.get_state), scope.protect(api.dispatch))
-                try:
+                scope = Invocation()
+                ctx = StoreAPI(protect(api.get_state), protect(api.dispatch))
+                with scope.activate():
                     return handler.run(self, action, ctx, scope)
-                finally:
-                    scope.active = False
 
             if not manual:
                 if pre and run_automatic(pre[0]) == "cancelled":
@@ -339,7 +322,7 @@ class Middleware(Generic[S, A]):
                 if post:
                     run_automatic(post[0])
                 return
-            scope = _Invocation()
+            scope = Invocation()
             forwarded = False
 
             def next_once(replacement: A) -> None:
@@ -352,13 +335,11 @@ class Middleware(Generic[S, A]):
                 next_dispatch(replacement)
 
             ctx = MiddlewareContext(
-                scope.protect(api.get_state), scope.protect(api.dispatch), scope.protect(next_once),
+                protect(api.get_state), protect(api.dispatch), protect(next_once),
             )
-            try:
+            with scope.activate():
                 outcome = manual[0].run(self, action, ctx, scope)
                 if outcome == "recovered" and not forwarded:
                     ctx.next(action)
-            finally:
-                scope.active = False
 
         return dispatch

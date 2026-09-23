@@ -341,11 +341,17 @@ MiddlewareError("reason") from error` to preserve the underlying cause.
 
 Recovery covers ordinary `Exception` failures from the handler itself. Failures
 from `ctx.next`, `ctx.dispatch`, or `ctx.get_state` propagate, including reducer,
-subscriber, and nested-dispatch failures. Once a context call fails, any later
-exception in that invocation also propagates, even if the handler catches and
-translates the original error. Explicitly catching an error and returning normally
-remains possible. Use the supplied context for store calls so this boundary can
-be tracked.
+subscriber, and nested-dispatch failures. This also applies when calling a retained
+`ctx.dispatch` callback or `store.dispatch` directly, including dispatch to another
+store. The failure is associated with the handler making the call, regardless of
+where the callback was obtained.
+
+Once such a call fails, any later exception in that handler invocation also
+propagates, even if the handler catches and translates the original error.
+Explicitly catching an error and returning normally remains possible. A failure
+handled entirely inside a nested dispatch does not disable the caller's recovery.
+Failure tracking ends with the handler invocation; it does not carry over to later
+dispatches.
 
 Library definition, dispatch, ambiguity, and return-contract errors are not
 recovered. `KeyboardInterrupt`, `SystemExit`, and other `BaseException` subclasses

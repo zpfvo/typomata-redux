@@ -6,6 +6,7 @@ from typing import Callable, Generic, Iterable, TypeVar, cast
 
 from typomata import BaseAction, BaseState
 
+from ._recovery import call_boundary
 from ._validation import require, returns_none, synchronous
 from .errors import DispatchError
 from .middleware import Dispatch, MiddlewareFactory, StoreAPI
@@ -64,10 +65,11 @@ class Store(Generic[S, A]):
         return self._state
 
     def dispatch(self, action: A) -> None:
-        self._check_access()
-        if not self._ready:
-            raise DispatchError("Cannot dispatch while constructing middleware")
-        self._dispatch(action)
+        with call_boundary():
+            self._check_access()
+            if not self._ready:
+                raise DispatchError("Cannot dispatch while constructing middleware")
+            self._dispatch(action)
 
     def _reduce(self, action: A) -> None:
         self._reducing = True
