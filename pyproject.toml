@@ -1,10 +1,10 @@
 [project]
 name = "typomata-redux"
 version = "0.1.0"
-description = "Synchronous typed Redux stores and middleware for Typomata"
+description = "Synchronous typed Redux with annotation-based reducers and middleware"
 readme = "README.md"
 requires-python = ">=3.10"
-dependencies = ["typomata>=0.1.0", "typing-extensions>=4.5"]
+dependencies = ["typing-extensions>=4.5"]
 license = "MIT"
 license-files = ["LICENSE"]
 
@@ -12,22 +12,18 @@ license-files = ["LICENSE"]
 requires = ["uv_build>=0.8.15,<0.9.0"]
 build-backend = "uv_build"
 
-[tool.uv.sources]
-# Development uses the reviewed sibling checkout, not an older published build.
-typomata = { path = "../typomata" }
-
 [dependency-groups]
 dev = ["mypy>=1.15", "pyright>=1.1.400"]
 
 [tool.mypy]
-files = ["src/typomata_redux", "tests/typing", "examples"]
+files = ["src/typomata_redux", "tests/typing", "tests/typing_optional", "examples"]
 python_version = "3.10"
 strict = true
 # Typomata's public __init_subclass__ currently lacks annotations.
 untyped_calls_exclude = ["typomata"]
 
 [tool.pyright]
-include = ["src/typomata_redux", "tests/typing", "examples"]
+include = ["src/typomata_redux", "tests/typing", "tests/typing_optional", "examples"]
 pythonVersion = "3.10"
 typeCheckingMode = "standard"
 venvPath = "."

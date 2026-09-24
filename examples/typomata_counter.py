@@ -1,68 +1,64 @@
-"""Nested state, two slices, an effect middleware, and a full-chain follow-up."""
+"""Optional Typomata integration: machine reducers alongside the core store."""
 from __future__ import annotations
 
 from dataclasses import dataclass
 
-from typing_extensions import assert_never
-from typomata_redux import Middleware, Store, StoreAPI, combine_reducers, intercept_pre, intercept_post
+from typomata import BaseAction, BaseState, BaseStateMachine, transition
+from typomata_redux import MachineReducer, Middleware, Store, StoreAPI, combine_reducers, intercept_pre, intercept_post
 
 
 @dataclass(frozen=True)
-class Add:
+class Add(BaseAction):
     amount: int
 
 
 @dataclass(frozen=True)
-class Remember:
+class Remember(BaseAction):
     value: int
 
 
 @dataclass(frozen=True)
-class NoOp:
+class NoOp(BaseAction):
     pass
 
 
-@dataclass(frozen=True)
-class Reset:
-    pass
-
-
-Actions = Add | Remember | NoOp | Reset
+Actions = Add | Remember | NoOp
 
 
 @dataclass(frozen=True)
-class Count:
+class Count(BaseState):
     value: int = 0
 
 
 @dataclass(frozen=True)
-class History:
+class History(BaseState):
     values: tuple[int, ...] = ()
 
 
 @dataclass(frozen=True)
-class AppState:
+class AppState(BaseState):
     count: Count = Count()
     history: History = History()
 
 
-def counter(state: Count, action: Add | Reset) -> Count:
-    if isinstance(action, Add):
+class Counter(BaseStateMachine):
+    @transition
+    def add(self, state: Count, action: Add) -> Count:
         return Count(state.value + action.amount)
-    if isinstance(action, Reset):
-        return Count()
-    assert_never(action)
 
 
-def recorder(state: History, action: Remember | Reset) -> History:
-    if isinstance(action, Remember):
+class Recorder(BaseStateMachine):
+    @transition
+    def remember(self, state: History, action: Remember) -> History:
         return History((*state.values, action.value))
-    if isinstance(action, Reset):
-        return History()
-    assert_never(action)
+
+
+counter = MachineReducer[Count](Counter())
+recorder = MachineReducer[History](Recorder())
 
 
 reduce = combine_reducers(AppState, count=counter, history=recorder)
+
 
 class Log(Middleware[AppState, Actions]):
     @intercept_pre
@@ -90,8 +86,6 @@ def main() -> None:
     old = store.get_state()
     store.dispatch(NoOp())
     assert store.get_state() is old
-    store.dispatch(Reset())
-    assert store.get_state() == AppState()
 
 
 if __name__ == "__main__":

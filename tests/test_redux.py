@@ -7,7 +7,7 @@ from typing import Annotated
 
 from typomata import BaseAction, BaseState, BaseStateMachine, transition
 from typomata_redux import (
-    AmbiguousHandlerError, DefinitionError, DispatchError, MachineReducer,
+    AmbiguousHandlerError, DefinitionError, DispatchError, FunctionReducer, MachineReducer,
     Middleware, MiddlewareContext, Store, intercept,
 )
 
@@ -141,15 +141,17 @@ class ReduxTests(unittest.TestCase):
             ("log", "after", 3), ("log", "after", 3),
         ])
 
-    def test_invalid_action_rejected_before_middleware(self):
+    def test_untyped_unrelated_objects_follow_unmatched_noop_path(self):
         events = []
         subject = store(Recording("log", events))
         for action in ({}, None, 42):
-            with self.subTest(action=action), self.assertRaises(TypeError):
+            with self.subTest(action=action):
+                old = subject.get_state()
                 subject.dispatch(action)
+                self.assertIs(subject.get_state(), old)
         self.assertEqual(events, [])
 
-    def test_invalid_replacement_rejected_before_downstream(self):
+    def test_untyped_unrelated_replacement_is_an_unmatched_noop(self):
         class Bad(Middleware[State, Actions]):
             @intercept
             def handle(self, action: Add, ctx: Context) -> None:
@@ -157,8 +159,7 @@ class ReduxTests(unittest.TestCase):
 
         events = []
         subject = store(Bad(), Recording("later", events))
-        with self.assertRaises(TypeError):
-            subject.dispatch(Add())
+        subject.dispatch(Add())
         self.assertEqual(events, [])
         self.assertEqual(subject.get_state(), State())
 
@@ -254,7 +255,9 @@ class ReduxTests(unittest.TestCase):
             subject.dispatch(Add())
         self.assertIs(caught.exception, failure)
         self.assertIs(subject.get_state(), old)
-        subject = store(reducer=lambda state, action: 4)
+        def invalid(state: State, action: Actions) -> State:
+            return 4
+        subject = store(reducer=FunctionReducer(invalid))
         old = subject.get_state()
         with self.assertRaises(TypeError):
             subject.dispatch(Add())
@@ -427,7 +430,7 @@ class ReduxTests(unittest.TestCase):
         declarations = [
             'def handle(self, action: Add, ctx: Context): pass',
             'def handle(self, action: Add, ctx: Context) -> int: return 1',
-            'def handle(self, action: int, ctx: Context) -> None: pass',
+            'def handle(self, action: list[Add], ctx: Context) -> None: pass',
             'def handle(self, action: Add, ctx: object) -> None: pass',
             'def handle(self, action: Add, ctx: Context, extra) -> None: pass',
             'def handle(self, *, action: Add, ctx: Context) -> None: pass',
@@ -506,7 +509,7 @@ class ReduxTests(unittest.TestCase):
             subject.dispatch(Add())
         self.assertEqual(events, [])
 
-    def test_removed_schema_arguments_and_bad_initial_state(self):
+    def test_removed_schema_arguments(self):
         with self.assertRaises(TypeError):
             MachineReducer[State](Counter(), states=State)
         with self.assertRaises(TypeError):
@@ -515,8 +518,6 @@ class ReduxTests(unittest.TestCase):
             Store(initial_state=State(), reducer=adapter(), states=State)
         with self.assertRaises(TypeError):
             Store(initial_state=State(), reducer=adapter(), actions=Actions)
-        with self.assertRaises(TypeError):
-            Store(initial_state=42, reducer=adapter())
 
     def test_state_category_transition_and_unhandled_pair(self):
         reducer = MachineReducer[State | Finished](

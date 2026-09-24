@@ -67,11 +67,11 @@ class InspectionTests(unittest.TestCase):
         subject.dispatch(Add())
         self.assertEqual(calls, ['factory', 'pre', 'pre', 'reducer', 'subscriber', 'post', 'post'])
 
-    def test_composition_keeps_paths_order_repeated_children_and_opaque_fields(self):
+    def test_composition_keeps_paths_order_repeated_children_and_function_fields(self):
         child = adapter()
         pair = combine_reducers(Pair, right=child, left=child)
 
-        def plain(state, action):
+        def plain(state: State, action: Add) -> State:
             return state
 
         reducer = combine_reducers(Root, pair=pair, count=plain)
@@ -85,8 +85,8 @@ class InspectionTests(unittest.TestCase):
         self.assertEqual(nested.fields[0].states, (State,))
         self.assertEqual(nested.fields[0].reducer, nested.fields[1].reducer)
         self.assertEqual(nested.fields[0].reducer.transitions[0].actions, (Add,))
-        self.assertEqual(info.fields[1].reducer.kind, 'opaque')
-        self.assertEqual(info.fields[1].reducer.transitions, ())
+        self.assertEqual(info.fields[1].reducer.kind, 'function')
+        self.assertEqual(info.fields[1].reducer.transitions[0].actions, (Add,))
         self.assertEqual(reducer(Root(), Add(2)).pair, Pair(State(2), State(2)))
 
     def test_transition_unions_and_snapshot_match_runtime(self):

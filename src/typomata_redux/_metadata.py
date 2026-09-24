@@ -37,7 +37,7 @@ class FieldInfo:
 @dataclass(frozen=True)
 class ReducerInfo:
     name: str
-    kind: Literal["machine", "combined", "opaque"]
+    kind: Literal["function", "machine", "combined", "opaque"]
     transitions: tuple[TransitionInfo, ...] = ()
     state_type: type | None = None
     fields: tuple[FieldInfo, ...] = ()

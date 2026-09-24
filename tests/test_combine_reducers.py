@@ -86,7 +86,9 @@ class CombineTests(unittest.TestCase):
         self.assertEqual(new.count, Count(1))
 
     def test_equal_but_new_child_is_a_change(self):
-        reducer = combine_reducers(Root, count=lambda state, action: Count(state.value))
+        def copy(state: Count, action: object) -> Count:
+            return Count(state.value)
+        reducer = combine_reducers(Root, count=copy)
         old = Root()
         new = reducer(old, Ignore())
         self.assertEqual(new, old)
@@ -112,12 +114,12 @@ class CombineTests(unittest.TestCase):
         events = []
         action = Add()
 
-        def count(state, event):
+        def count(state: Count, event: Add) -> Count:
             events.append((state, event))
             self.assertIs(state, old.count)
             return Count(5)
 
-        def history(state, event):
+        def history(state: History, event: Add) -> History:
             events.append((state, event))
             self.assertIs(state, old.history)
             return History((9,))
@@ -128,7 +130,7 @@ class CombineTests(unittest.TestCase):
     def test_failure_in_later_slice_does_not_commit_earlier_slice(self):
         failure = ValueError("history failed")
 
-        def fails(state, action):
+        def fails(state: History, action: Add) -> History:
             raise failure
 
         old = Root()
@@ -192,18 +194,23 @@ class CombineTests(unittest.TestCase):
         self.assertIs(reducer(old, Add()), old)
 
     def test_plain_reducer_bad_result_rejected_before_commit(self):
+        def invalid(state: Count, action: Add) -> Count:
+            return History()  # Deliberately violates its declaration.
         old = Root()
         subject = Store[Root, Actions](
             initial_state=old,
-            reducer=combine_reducers(Root, count=lambda state, action: History()),
+            reducer=combine_reducers(Root, count=invalid),
         )
-        with self.assertRaisesRegex(TypeError, "Root.count result"):
+        with self.assertRaisesRegex(TypeError, "invalid result"):
             subject.dispatch(Add())
         self.assertIs(subject.get_state(), old)
 
     def test_bad_field_input_rejected_before_child_invocation(self):
         calls = []
-        reducer = combine_reducers(Root, count=lambda state, action: calls.append(state))
+        def record(state: Count, action: Add) -> Count:
+            calls.append(state)
+            return state
+        reducer = combine_reducers(Root, count=record)
         with self.assertRaisesRegex(TypeError, "Root.count input"):
             reducer(Root(count=History()), Add())
         self.assertEqual(calls, [])
@@ -235,7 +242,7 @@ class CombineTests(unittest.TestCase):
         class UnionRoot(BaseState):
             part: Count | History = Count()
 
-        def switch(state, action):
+        def switch(state: Count | History, action: Add) -> Count | History:
             return History() if isinstance(state, Count) else state
 
         reducer = combine_reducers(UnionRoot, part=switch)

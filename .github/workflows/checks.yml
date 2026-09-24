@@ -26,9 +26,15 @@ jobs:
           version: "0.12.10"
           python-version: ${{ matrix.python }}
       - run: uv sync --locked
-      - run: uv run --locked python -m unittest discover -s tests -v
-      - run: uv run --locked mypy
-      - run: uv run --locked pyright
+      - run: uv run --locked python -m unittest discover -s tests -p test_functions.py -v
       - run: uv run --locked python scripts/verify_typing.py
       - run: uv run --locked python examples/counter.py
-      - run: uv run --locked python scripts/verify_distribution.py
+      - run: uv pip install --no-deps ../typomata
+      - run: uv run --no-sync python -m unittest discover -s tests -v
+      - run: uv run --no-sync mypy
+      - run: uv run --no-sync pyright
+      - run: uv run --no-sync python scripts/verify_typing.py
+      - run: uv run --no-sync python scripts/verify_typing.py --fixtures tests/typing_optional
+      - run: uv run --no-sync python examples/counter.py
+      - run: uv run --no-sync python examples/typomata_counter.py
+      - run: uv run --no-sync python scripts/verify_distribution.py

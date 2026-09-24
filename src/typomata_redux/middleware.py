@@ -8,15 +8,14 @@ from inspect import Parameter, Signature, isfunction, signature
 from typing import Any, Callable, Generic, Literal, TypeVar, cast, get_origin, get_type_hints, overload
 
 from typing_extensions import ParamSpec, TypeAlias
-from typomata import BaseAction, BaseState
 
 from ._metadata import InterceptorInfo, Phase
 from ._recovery import Invocation, protect
 from ._validation import classes, require, returns_none, synchronous
 from .errors import AmbiguousHandlerError, CancelAction, DefinitionError, DispatchError, MiddlewareError
 
-S = TypeVar("S", bound=BaseState)
-A = TypeVar("A", bound=BaseAction)
+S = TypeVar("S")
+A = TypeVar("A")
 P = ParamSpec("P")
 Dispatch: TypeAlias = Callable[[A], None]
 _Outcome = Literal["returned", "recovered", "cancelled"]
@@ -222,7 +221,7 @@ def _resolve(owner: type, name: str, decl: _Declaration) -> _Handler:
         hints = get_type_hints(decl.original, localns=dict(vars(owner)), include_extras=True)
     except Exception as error:
         raise DefinitionError(f"{context}: cannot resolve annotations: {error}") from error
-    actions = classes(hints.get(parameters[1].name), BaseAction, context)
+    actions = classes(hints.get(parameters[1].name), context)
     ctx = hints.get(parameters[2].name)
     expected = MiddlewareContext if decl.phase == "manual" else StoreAPI
     if get_origin(ctx) is not expected:

@@ -1,32 +1,29 @@
 # Typomata Redux
 
-Synchronous, typed Redux stores with [Typomata](../typomata) state machines as
-reducers. Describe state changes with annotated methods, compose them over nested
-state, and keep side effects in middleware.
+Synchronous, typed Redux with annotation-based reducers and middleware. Write
+ordinary reducer functions, compose them over nested state, and keep side effects
+in middleware. State and action types need no marker base classes.
 
-This is an early implementation. The core API is ready to try in an application;
-compatibility with published Typomata releases still needs verification.
+[Typomata](../typomata) state machines remain an optional integration. The core
+package runs without Typomata installed. The project name is still provisional.
 
 - [Setup](#setup) and [quick start](#quick-start)
-- [Combining reducers](#combining-reducers)
-- [Choosing a middleware decorator](#choosing-a-middleware-decorator)
-- [Passing dependencies](#passing-dependencies-to-middleware)
-- [Exception handling](#middleware-exception-handling)
-- [Subscriptions](#subscriptions) and [async work](#async-work)
+- [Combining reducers](#combining-reducers) and [optional Typomata integration](#optional-typomata-integration)
+- [Choosing middleware](#choosing-a-middleware-decorator) and [passing dependencies](#passing-dependencies-to-middleware)
+- [Exception handling](#middleware-exception-handling), [subscriptions](#subscriptions), and [async work](#async-work)
 - [API reference](#api-reference), [typing limits](#static-typing-boundaries), and [development](#development)
 
 ## How the pieces fit
 
-An **action** is a `BaseAction` object describing what happened. **State** is a
-`BaseState` object; use immutable values so old state remains meaningful.
-A **reducer** takes state and an action and returns the next state without side
-effects. A **store** owns the current state and sends dispatched actions through
-its middleware to the reducer.
+An **action** describes what happened. **State** holds the application's data;
+prefer frozen dataclasses and immutable nested values. A **reducer** takes state
+and an action and returns the next state without side effects. A **store** owns
+the current state and sends dispatched actions through middleware to the reducer.
 
-Typomata selects reducer methods by **state type and action type**. Middleware
-selects methods by **action type only**; a handler reads any needed state through
-its context. An unhandled reducer action returns the same state object. An
-unhandled middleware action continues downstream.
+In composition, each function receives only actions matching its action annotation.
+An unrelated action preserves that slice's state object. Multiple slices can handle
+the same action. Middleware also selects handlers by action annotation and reads
+state through its context. An unmatched middleware action continues downstream.
 
 With `middleware=[First(), Second()]`, normal dispatch proceeds in this order:
 
@@ -41,145 +38,193 @@ shorten this sequence; the sections below explain how post-handlers unwind.
 
 ## Setup
 
-Requires Python 3.10+ and the reviewed Typomata checkout alongside this project:
-
-```text
-python/
-  typomata/
-  python-typomata-redux/
-```
+Requires Python 3.10+. Install the core from this checkout:
 
 ```bash
-uv sync
-uv run python examples/counter.py
+python -m pip install .
 ```
 
-The uv source override installs the sibling Typomata checkout. Built distribution
-metadata declares `typomata>=0.1.0`; compatibility with older published builds has
-not been verified. Install this package together with the reviewed Typomata build
-until that project's validated implementation is released.
+Or use uv without the development dependencies:
+
+```bash
+uv sync --no-dev
+uv run --no-dev python examples/counter.py
+```
+
+Neither command installs Typomata. The [development setup](#development) installs the reviewed Typomata checkout
+separately to test the optional integration.
 
 ## Quick start
 
-This complete example defines an action, state, reducer, and manual middleware:
+This complete example defines plain state/action dataclasses, a reducer, and manual
+middleware. The reducer's action union stays narrow and supports exhaustive checking:
 
 ```python
 from dataclasses import dataclass
-from typomata import BaseAction, BaseState, BaseStateMachine, transition
-from typomata_redux import MachineReducer, Middleware, MiddlewareContext, Store, intercept
+from typing_extensions import assert_never
+from typomata_redux import FunctionReducer, Middleware, MiddlewareContext, Store, intercept
 
 @dataclass(frozen=True)
-class Count(BaseState):
+class Count:
     value: int = 0
 
 @dataclass(frozen=True)
-class Add(BaseAction):
+class Add:
     amount: int
 
-class Counter(BaseStateMachine):
-    @transition
-    def add(self, state: Count, action: Add) -> Count:
-        return Count(state.value + action.amount)
+@dataclass(frozen=True)
+class Reset:
+    pass
 
-class Log(Middleware[Count, Add]):
+CounterAction = Add | Reset
+
+def counter(state: Count, action: CounterAction) -> Count:
+    if isinstance(action, Add):
+        return Count(state.value + action.amount)
+    if isinstance(action, Reset):
+        return Count()
+    assert_never(action)
+
+class Log(Middleware[Count, CounterAction]):
     @intercept
-    def add(self, action: Add, ctx: MiddlewareContext[Count, Add]) -> None:
+    def log(self, action: CounterAction, ctx: MiddlewareContext[Count, CounterAction]) -> None:
         print("before", ctx.get_state())
         ctx.next(action)
         print("after", ctx.get_state())
 
-store = Store[Count, Add](
-    initial_state=Count(),
-    reducer=MachineReducer[Count](Counter()),
-    middleware=[Log()],
+store = Store[Count, CounterAction](
+    initial_state=Count(), reducer=counter, middleware=[Log()],
 )
 store.dispatch(Add(2))  # Returns None.
 assert store.get_state() == Count(2)
 ```
 
-The store's `dispatch` returns `None`; read the current state with `get_state()`.
-`ctx.next(action)` forwards to the next middleware or the reducer. Returning without
-calling it consumes the action, then earlier middleware resumes normally.
+`Store[S, A]` exposes `get_state() -> S` and `dispatch(action: A) -> None`.
+`ctx.next(action)` forwards downstream. Returning without calling it consumes the
+action, then earlier middleware resumes normally.
 
-Use `Store[State, ActionUnion]` for the application's action vocabulary. Individual
-handler annotations can stay narrow. State unions work too, for example
-`MachineReducer[Idle | Loading | Ready](DownloadMachine())`.
-
-The runnable [example](examples/counter.py) uses a nested root state and composed
-slice reducers. A plain `(state, action) -> state` function is also accepted.
+A plain root reducer is called directly for every dispatched action and must
+accept the store's action vocabulary. Use `FunctionReducer(counter)` if you want
+annotation-based filtering and result validation for a standalone reducer too.
+The [runnable example](examples/counter.py) composes two slices and dispatches a
+follow-up action from middleware.
 
 ## Combining reducers
 
-Use the root dataclass's field names to wire slice reducers. This extends the quick start with a root state containing a counter slice:
+Pass annotated functions directly, using the root dataclass's field names:
 
 ```python
 from typomata_redux import combine_reducers
 
 @dataclass(frozen=True)
-class AppState(BaseState):
+class AppState:
     count: Count = Count()
     title: str = "Counter"
 
-reducer = combine_reducers(
-    AppState,
-    count=MachineReducer[Count](Counter()),
-)
-app = Store[AppState, Add](initial_state=AppState(), reducer=reducer)
+reducer = combine_reducers(AppState, count=counter)
+app = Store[AppState, CounterAction](initial_state=AppState(), reducer=reducer)
 app.dispatch(Add(3))
 assert app.get_state().count == Count(3)
 assert app.get_state().title == "Counter"
 ```
 
-Pass the combined reducer directly to `Store`; no handwritten root reducer is
-needed. The [runnable example](examples/counter.py) composes two slices.
-Each action goes to every configured child, with their own original slice state. The helper
-returns the identical root object if all slices are unchanged; otherwise it
-rebuilds the dataclass once, sharing unchanged branches. Unconfigured constructor
-fields keep their values. Comparison uses identity, not equality.
+Composition wraps each plain function in `FunctionReducer` once, reading its
+state, action, and result annotations. The function's own signature stays intact:
+there is no separate action list or broad input annotation to maintain. Each action
+is considered for every slice, and functions run only when their action annotation
+matches, including subclasses. Shared actions such as `Reset` can reach several
+slices. A function accepting `object` as its action type handles every action.
+
+Matching functions receive their own original slice state, in keyword order.
+The combined reducer returns the identical root object when all slices retain
+identity; otherwise it rebuilds the dataclass once, sharing unchanged branches.
+Unconfigured fields keep their values. Comparison uses identity, not equality.
 
 Composition nests to match your application's state shape:
 
 ```python
-downloads = combine_reducers(DownloadsState, current=download_reducer)
-reducer = combine_reducers(AppState, downloads=downloads, settings=settings_reducer)
+@dataclass(frozen=True)
+class NestedState:
+    feature: AppState = AppState()
+
+nested = combine_reducers(NestedState, feature=reducer)
+assert nested(NestedState(), Add(2)).feature.count == Count(2)
 ```
 
-Each configured field must be annotated with a `BaseState` subclass, a union of
-state classes, or an `Annotated` form. Other fields, such as labels or configuration,
-can be left unconfigured. Children may be machine adapters, combined reducers,
-or ordinary synchronous functions. Plain slice functions must accept `BaseAction`
-and narrow it before reading action-specific fields:
+Plain functions and bound methods must declare exactly two required positional
+parameters (state, action) and a result annotation. Names may differ. Supported
+annotations are concrete classes, unions, and `Annotated` wrappers. State can be a
+scalar such as `int`, a dataclass, or a union of state classes. `Any`, unresolved
+names, generic TypeVars, parameterized types such as `list[Item]`, and protocols
+are rejected. Wrap collection state in a dataclass when needed. Unannotated
+lambdas, callable instances, partials, and async/generator reducers are not supported
+as automatically adapted slices. A plain root function is not subject to this
+annotation-inspection contract. Reducers must return state immediately; returned
+awaitables and generators are rejected.
+
+Annotations resolve in module scope and, for bound methods, the declaring context
+available on the bound owner. Function-local forward references are not searched
+for automatically. Definitions are snapshotted at adapter construction.
+
+Each function must accept every state variant declared for its field; filtering
+is by action type. Its declared return types must fit that field. Construction
+rejects incompatible annotations and unknown field names; dispatch checks field
+inputs and function results. These checks are shallow and do not prove purity or
+deep immutability. Exceptions from matching functions propagate, never become
+no-ops, and prevent the root state from being committed.
+
+Existing `FunctionReducer`, `MachineReducer`, and `CombinedReducer` instances can
+also be passed as children. For explicit root typing use
+`CombinedReducer[AppState](AppState, count=counter)`. The helper infers that type
+from `AppState`. Adapted and combined reducers accept `object`; the store retains
+its own precise action union.
+
+Rebuilding uses `dataclasses.replace`, including constructor/`__post_init__` behavior.
+Fields with `init=False` cannot be targeted and may be recomputed. Required `InitVar`
+arguments need a custom root reducer. In-place mutation and side effects cannot
+be rolled back; keep reducers pure.
+
+## Optional Typomata integration
+
+Use a Typomata machine when routing by both state type and action type helps your
+domain. It can coexist with function reducers in the same composition:
 
 ```python
-def count_reducer(state: Count, action: BaseAction) -> Count:
-    if isinstance(action, Add):
-        return Count(state.value + action.amount)
-    return state
+from dataclasses import dataclass
+from typomata import BaseAction, BaseState, BaseStateMachine, transition
+from typomata_redux import MachineReducer, Store
+
+@dataclass(frozen=True)
+class MachineCount(BaseState):
+    value: int = 0
+
+@dataclass(frozen=True)
+class Increase(BaseAction):
+    amount: int
+
+class CountMachine(BaseStateMachine):
+    @transition
+    def increase(self, state: MachineCount, action: Increase) -> MachineCount:
+        return MachineCount(state.value + action.amount)
+
+machine_store = Store[MachineCount, Increase](
+    initial_state=MachineCount(),
+    reducer=MachineReducer[MachineCount](CountMachine()),
+)
+machine_store.dispatch(Increase(2))
+assert machine_store.get_state() == MachineCount(2)
 ```
 
-Machine adapters do this dispatch automatically using transition annotations.
-Initial values still come from `Store(initial_state=...)`. A plain root reducer
-passed directly to `Store` can instead accept the store's specific action union.
+Typomata itself requires its base classes on the machine's states and actions;
+ordinary Redux functions and middleware do not. `MachineReducer` uses the public
+`transition_map()` interface and invokes the decorated transition methods. An
+unmatched state/action pair preserves state identity. Multiple matching transitions
+raise `AmbiguousHandlerError`.
 
-The root state type is inferred and preserved statically. Composed reducers accept
-`BaseAction`; the application action union belongs on the store. Python type checkers cannot
-verify keyword names against dataclass field types: constructor checks reject
-unknown fields and incompatible transition or nested-composition declarations; runtime checks
-validate each field input and result. A plain function's state annotation is not
-inspected; annotate it normally for static checking. Miswiring one can fail inside
-that function. Different field types require a deliberately erased state type at
-this composition boundary; downstream root-state access remains precisely typed.
-
-For explicit type parameters, use
-`CombinedReducer[AppState](AppState, count=counter, history=recorder)`.
-`combine_reducers` infers the state type from the root class. An empty
-`CombinedReducer[AppState](AppState)` is an identity reducer.
-
-Rebuilding uses `dataclasses.replace`, including normal constructor/`__post_init__`
-behavior. Fields with `init=False` cannot be targeted and may be recomputed when
-the root is rebuilt. Required `InitVar` arguments need a custom root reducer.
-Reducers must remain pure; if a later child fails, the store does not commit the
-partially computed root, but it cannot undo in-place mutation or side effects.
+The integration is tested against the reviewed sibling Typomata checkout at commit
+`53bf9aa2ef2d59574217c13477df8e46c2914ec1`. Compatibility with other published builds
+has not been established. Install that reviewed build when using machines; it is
+not a core package dependency. See [the integration example](examples/typomata_counter.py).
 
 ## Choosing a middleware decorator
 
@@ -284,7 +329,7 @@ try:
     database.execute("CREATE TABLE counts (value INTEGER NOT NULL)")
     store = Store[Count, Add](
         initial_state=Count(),
-        reducer=MachineReducer[Count](Counter()),
+        reducer=counter,
         middleware=[SaveCount(database)],
     )
     store.dispatch(Add(2))
@@ -367,7 +412,7 @@ regardless of which action caused it.
 
 ```python
 subscription_store = Store[Count, Add](
-    initial_state=Count(), reducer=MachineReducer[Count](Counter()),
+    initial_state=Count(), reducer=counter,
 )
 
 def on_update() -> None:
@@ -420,8 +465,8 @@ def logging(api: StoreAPI[Count, Add], next_dispatch: Dispatch[Add]) -> Dispatch
 ```
 
 Factories run right-to-left as the chain is assembled. Execution runs in configured
-order. Store boundaries check that actions inherit `BaseAction` and handlers return
-`None`; they do not runtime-enforce the store's generic action union.
+order. Store boundaries check that handlers return `None`; the store's generic
+state and action contracts are enforced statically, not by runtime union checks.
 The per-invocation one-call/lifetime guard is supplied by annotated `Middleware`;
 plain factories manage their own forwarding lifetimes.
 
@@ -436,7 +481,8 @@ All names below are exported from `typomata_redux`. `S` denotes a state type and
 | `store.dispatch(action) -> None` | Dispatch synchronously through the entire chain. |
 | `store.get_state() -> S` | Read the current state object. |
 | `store.subscribe(listener) -> Callable[[], None]` | Register a no-argument listener and return an unsubscribe function. |
-| `MachineReducer[S](machine)` | Adapt Typomata transitions to a reducer accepting `BaseAction`. |
+| `FunctionReducer(function)` | Infer state typing and filter actions from function annotations; composition does this automatically. |
+| `MachineReducer[S](machine)` | Adapt optional Typomata transitions to a reducer accepting `object`. |
 | `combine_reducers(StateClass, field=reducer, ...)` | Infer the root type and compose dataclass slices. |
 | `CombinedReducer[S](StateClass, field=reducer, ...)` | Construct composition with an explicit root type. |
 | `Middleware[S, A]` | Base class for annotated middleware handlers. |
@@ -458,36 +504,26 @@ Runtime action and return-value checks can also raise `TypeError`. See
 
 ## Static typing boundaries
 
-- Store dispatch, middleware context dispatch, state access, and direct handler
-  calls retain precise static types. Run mypy or Pyright on application code.
-- `MachineReducer[S]` is a declaration by the caller: Typomata's `BaseStateMachine`
-  is not generic, so a checker cannot prove that all registered transitions stay
-  inside `S`. Use the union of possible slice states. Typomata checks each actual
-  transition result against its return annotation; composition additionally checks
-  declarations and results against the dataclass field type.
-- Composition field names and heterogeneous reducer wiring remain runtime-checked.
-- Middleware handler action annotations determine routing. Their relation to the
-  middleware/store's generic action union is not exhaustively checked at registration.
-- A handler's context annotation is not statically linked to its owning middleware.
-  For example, a handler in `Middleware[Count, Add]` can incorrectly declare
-  `StoreAPI[Profile, Add]` and still pass mypy and Pyright. The actual state is
-  `Count`; reading a Profile-only attribute will fail at runtime. Keep context
-  state/action arguments consistent with the middleware. Application-level context
-  aliases can reduce repetition, but do not enforce this relationship.
-
-Types are declared through generics and handler annotations, without separate
-`states=` or `actions=` configuration. Slice reducers accept `BaseAction`, so
-individual slices do not need to import the application's full action union.
-The store's generic parameters express static contracts rather than runtime
-validation of the exact union members.
-
-Runtime checks remain where existing information is sufficient: transition
-annotations, action/state base classes, dataclass field types, ambiguity, and
-middleware forwarding rules. Passing an unrelated `BaseAction` through untyped
-code is not rejected merely because it is outside the store's static action union.
-A plain reducer's result is checked as `BaseState`, not against the store's generic
-state union. Frozen dataclasses and immutable nested values are recommended;
-checks do not prove purity or deep immutability.
+- Store dispatch, context dispatch, state access, and direct function/handler calls
+  retain precise static types. A narrow function body can use `assert_never` to
+  check exhaustive handling as its action union grows.
+- `FunctionReducer` infers the state type from the function signature; composition
+  infers the root type from its dataclass. Heterogeneous field/reducer wiring is
+  not statically linked to field names. Runtime checks use the field and function
+  annotations to reject incompatible wiring.
+- `MachineReducer[S]` remains a caller declaration: the nongeneric Typomata registry
+  does not let checkers prove that transitions stay within `S`. Composition checks
+  those declarations against the field; Typomata checks actual transition results.
+- Handler action/context annotations are not statically linked to their owning
+  `Middleware[S, A]`. A handler in `Middleware[Count, Add]` can incorrectly declare
+  `StoreAPI[AppState, Add]` and pass mypy/Pyright, then fail reading `.count` from
+  the actual `Count`. Shared aliases below reduce repetition but do not enforce
+  that relationship. The known-gap fixtures keep these limits visible.
+- `Store[S, A]` does not inspect its generic arguments or require base-class markers.
+  Untyped callers can dispatch objects outside `A`. Adapted slices treat unmatched
+  actions as no-ops. A plain root function is trusted to accept the action and
+  return a valid state; use `FunctionReducer` for declared input/result checks.
+  Validate external data before dispatch.
 
 ### Sharing middleware type aliases
 
@@ -499,7 +535,7 @@ from repeatedly spelling out the state and action union. Building on the quick s
 from typing import TypeAlias
 from typomata_redux import StoreAPI, intercept_post
 
-class NoOp(BaseAction):
+class NoOp:
     pass
 
 CounterActions: TypeAlias = Add | NoOp
@@ -521,7 +557,7 @@ class ReportCount(CounterMiddleware):
 
 counter_store = Store[Count, CounterActions](
     initial_state=Count(),
-    reducer=MachineReducer[Count](Counter()),
+    reducer=FunctionReducer(counter),
     middleware=[ValidateAmount(), ReportCount()],
 )
 counter_store.dispatch(Add(2))  # Prints 2.
@@ -584,53 +620,72 @@ that object remain shared: use separate instances for independently owned effect
 
 ## Development
 
-From the project checkout after `uv sync`:
+The complete development suite includes optional Typomata integration tests. Keep
+the reviewed checkout alongside this project:
 
-```bash
-uv run python -m unittest discover -s tests -v
-uv run mypy
-uv run pyright
-uv run python scripts/verify_typing.py
-uv run python examples/counter.py
-uv build
-uv run python scripts/verify_distribution.py
+```text
+python/
+  typomata/
+  python-typomata-redux/
 ```
 
-`verify_typing.py` checks valid consumers and verifies negative cases independently
-with mypy and Pyright. It copies the fixtures to a temporary directory, removes
-both checkers' suppression comments, and checks each expected diagnostic by file,
-line, and code. Missing or unexpected diagnostics fail the check. Declaration,
-context, and store-wiring mistakes are covered alongside incorrect calls.
+```bash
+uv sync --locked
+uv pip install --no-deps ../typomata
+uv run --no-sync python -m unittest discover -s tests -v
+uv run --no-sync mypy
+uv run --no-sync pyright
+uv run --no-sync python scripts/verify_typing.py
+uv run --no-sync python scripts/verify_typing.py --fixtures tests/typing_optional
+uv run --no-sync python examples/counter.py
+uv run --no-sync python examples/typomata_counter.py
+uv build
+uv run --no-sync python scripts/verify_distribution.py
+```
 
-Known middleware declaration gaps are kept in `tests/typing/known_gaps` and reported
-separately. A passing run does not claim those declarations are rejected. If either
-checker begins rejecting a known gap, the check fails so the fixture and documented
-limitation can be reviewed.
+The development group contains only the type checkers. The explicit local install
+adds Typomata for integration tests; `--no-sync` keeps uv from replacing that
+separately installed dependency. Core installation and its lockfile need no sibling
+checkout. The integration dependency is absent from core package metadata.
 
-The distribution verification builds wheels from source archives, runs tests and
-the example against an installed package, and runs the same positive and negative
-typing checks outside the source tree against that installation. CI runs both
-source and installed-package checks.
+`verify_typing.py` verifies valid consumers and explicit negative cases independently
+with mypy and Pyright. It copies fixtures outside the source tree, removes both
+checkers' suppression comments, and compares diagnostics by file, line, and code.
+Missing or unexpected diagnostics fail. Known middleware declaration gaps are
+reported separately; if a checker starts rejecting one, verification fails so the
+fixture and documented limitation can be reviewed.
+
+Distribution verification first installs only the core wheel and verifies that
+Typomata is absent. It runs the function-first tests, example, and typing checks.
+It then installs the reviewed Typomata wheel and runs the complete runtime suite,
+integration example, and optional typing fixtures. CI runs these checks on Python
+3.10–3.14.
 
 ## Migrating the earlier API
 
-- `MachineReducer[S, A](machine, states=S, actions=A)` becomes `MachineReducer[S](machine)`.
-- `CombinedReducer[S, A](S, ...)` becomes `CombinedReducer[S](S, ...)`, or use `combine_reducers(S, ...)`.
-- `Store[S, A](..., states=S, actions=A)` becomes `Store[S, A](...)`.
-- Remove narrow-action routing adapters. Slice dispatch accepts `BaseAction` and
-  ignores unmatched actions; handler signatures remain narrow.
+From the previous version of this project:
 
-The old schema keywords are removed, not silently accepted. Initial state still
-comes from `initial_state`. Runtime enforcement of the store's exact generic
-state/action vocabulary is no longer provided.
+- Plain slice functions can use their own narrow action union. Pass them directly
+  to `combine_reducers`; it derives the runtime filter from the annotation.
+- Add state/action/result annotations to handwritten slices. Unannotated lambdas
+  previously accepted by composition now fail at construction.
+- `BaseState` and `BaseAction` inheritance is optional for core functions, stores,
+  and middleware. Existing Typomata-based classes still work; keep those bases
+  when used by Typomata machines. Use `object` for a core handler accepting all actions.
+- Core installation no longer installs Typomata. Machine users must install the
+  integration dependency themselves. `MachineReducer[S](machine)` remains supported.
+- Generic state/action contracts are static. The former runtime base-class checks
+  are removed; validate untyped external data explicitly.
+
+The older `states=` and `actions=` schema keywords remain removed. Initial state
+still comes from `Store(initial_state=...)`. There is no automatic initial-state
+factory or action-union inference from the application's slices.
 
 ## Scope
 
-This implementation adapts public `transition_map()` snapshots and invokes
-Typomata's decorated methods. It does not use private Typomata internals or modify
-Typomata. Internal inspection metadata now describes registered middleware handlers,
-reducer transitions, and nested composition using the same declarations as dispatch.
-It records plain callables and custom dispatch implementations as opaque; it does
-not execute handlers or predict their side effects. This metadata is internal and
-has no public API stability guarantee. There are no diagrams yet; static
-action-handler diagrams remain the final planned feature.
+The working name remains `typomata-redux`, but the core no longer depends on
+Typomata. Internal inspection describes function reducers, machine transitions,
+middleware handlers, and nested composition using dispatch's own declarations.
+Plain root callables and custom dispatch overrides remain opaque. Inspection does
+not execute handlers or predict side effects, and its metadata has no public
+stability guarantee. Static action-handler diagrams remain the final planned feature.

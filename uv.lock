@@ -371,30 +371,11 @@ wheels = [
 ]
 
 [[package]]
-name = "typomata"
-version = "0.1.0"
-source = { directory = "../typomata" }
-dependencies = [
-    { name = "typing-extensions" },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "graphviz", marker = "extra == 'diagrams'" },
-    { name = "typing-extensions", specifier = ">=4.5" },
-]
-provides-extras = ["diagrams"]
-
-[package.metadata.requires-dev]
-dev = [{ name = "mypy", specifier = ">=2.3.1" }]
-
-[[package]]
 name = "typomata-redux"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
     { name = "typing-extensions" },
-    { name = "typomata" },
 ]
 
 [package.dev-dependencies]
@@ -404,10 +385,7 @@ dev = [
 ]
 
 [package.metadata]
-requires-dist = [
-    { name = "typing-extensions", specifier = ">=4.5" },
-    { name = "typomata", directory = "../typomata" },
-]
+requires-dist = [{ name = "typing-extensions", specifier = ">=4.5" }]
 
 [package.metadata.requires-dev]
 dev = [

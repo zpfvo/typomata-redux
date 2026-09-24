@@ -1,22 +1,85 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, fields, is_dataclass, replace
-from inspect import iscoroutine
-from typing import Any, Callable, Generic, TypeVar, cast, get_type_hints
-
-from typomata import BaseAction, BaseState, BaseStateMachine
+from inspect import Parameter, isfunction, ismethod, signature
+from typing import Any, Callable, Generic, Iterable, Mapping, Protocol, TypeVar, cast, get_type_hints
 
 from ._metadata import TransitionInfo
-from ._validation import classes, compatible_inputs, require, synchronous
+from ._validation import classes, compatible_inputs, require, synchronous, synchronous_result
 from .errors import AmbiguousHandlerError, DefinitionError
 
-S = TypeVar("S", bound=BaseState)
+S = TypeVar("S")
+A = TypeVar("A")
+
+
+class _TransitionMachine(Protocol):
+    """The public Typomata snapshot interface; importing Typomata is unnecessary."""
+
+    def transition_map(self) -> Iterable[Mapping[str, Any]]: ...
+
+
+class FunctionReducer(Generic[S]):
+    """Adapt an annotated function or bound method to accept unrelated actions.
+
+    combine_reducers applies this automatically. Explicit construction also works
+    for a standalone store. The function must declare two positional parameters
+    (state, action) and a result using concrete classes, unions, or Annotated.
+    Action matching includes subclasses. Unmatched actions preserve state identity.
+    State/result declarations are validated; annotations are resolved once.
+    """
+
+    def __init__(self, reducer: Callable[[S, A], S]) -> None:
+        # Keep the callable's generic contract when inspect narrows the other
+        # reference to an unparameterized function/method type.
+        typed_reducer = reducer
+        synchronous(reducer, "function reducer")
+        if not (isfunction(reducer) or ismethod(reducer)):
+            raise DefinitionError("FunctionReducer expects an annotated function or bound method")
+        name = f"{reducer.__module__}.{reducer.__qualname__}"
+        try:
+            parameters = tuple(signature(reducer).parameters.values())
+            owner = getattr(reducer, "__self__", None)
+            owner_type = owner if isinstance(owner, type) else type(owner)
+            hints = get_type_hints(reducer, localns=dict(vars(owner_type)), include_extras=True)
+        except Exception as error:
+            raise DefinitionError(f"{name}: cannot resolve reducer annotations: {error}") from error
+        if len(parameters) != 2 or any(
+            param.kind not in (Parameter.POSITIONAL_ONLY, Parameter.POSITIONAL_OR_KEYWORD)
+            or param.default is not Parameter.empty for param in parameters
+        ):
+            raise DefinitionError(f"{name}: expected two required positional parameters (state, action)")
+        self._info = TransitionInfo(
+            name=name,
+            sources=classes(hints.get(parameters[0].name), f"{name} state"),
+            actions=classes(hints.get(parameters[1].name), f"{name} action"),
+            destinations=classes(hints.get("return"), f"{name} result"),
+        )
+
+        def invoke(state: S, action: object) -> S:
+            return typed_reducer(state, cast(A, action))
+
+        self._invoke = invoke
+
+    def _validate_field(self, allowed: tuple[type, ...], context: str) -> None:
+        if not all(any(issubclass(state, source) for source in self._info.sources) for state in allowed):
+            raise DefinitionError(f"{context}: function does not accept every declared field state")
+        if not all(any(issubclass(dest, state) for state in allowed) for dest in self._info.destinations):
+            raise DefinitionError(f"{context}: function result is outside the field state types")
+
+    def __call__(self, state: S, action: object) -> S:
+        require(state, self._info.sources, f"{self._info.name} state")
+        if not isinstance(action, self._info.actions):
+            return state
+        result = self._invoke(state, action)
+        synchronous_result(result, f"{self._info.name} result")
+        require(result, self._info.destinations, f"{self._info.name} result")
+        return result
 
 
 @dataclass(frozen=True)
 class _Case:
     info: TransitionInfo
-    invoke: Callable[[BaseStateMachine, BaseState, BaseAction], BaseState]
+    invoke: Callable[[object, object, object], object]
 
 
 class MachineReducer(Generic[S]):
@@ -26,7 +89,7 @@ class MachineReducer(Generic[S]):
     annotations, not a second state/action schema or generic introspection.
     """
 
-    def __init__(self, machine: BaseStateMachine) -> None:
+    def __init__(self, machine: _TransitionMachine) -> None:
         self._machine = machine
         self._cases = tuple(
             _Case(
@@ -47,9 +110,7 @@ class MachineReducer(Generic[S]):
             if not all(any(issubclass(dest, state) for state in allowed) for dest in case.info.destinations):
                 raise DefinitionError(f"{context}: transition destination is outside the field state types")
 
-    def __call__(self, state: S, action: BaseAction) -> S:
-        require(state, (BaseState,), "reducer state")
-        require(action, (BaseAction,), "reducer action")
+    def __call__(self, state: S, action: object) -> S:
         matches = [case for case in self._cases
                    if isinstance(state, case.info.sources) and isinstance(action, case.info.actions)]
         if not matches:
@@ -69,7 +130,7 @@ class _FieldReducer:
     states: tuple[type, ...]
     # Different fields have different state types. Validate against the field's
     # annotation before/after crossing this deliberately erased state boundary.
-    reducer: Callable[[Any, BaseAction], BaseState]
+    reducer: Callable[[Any, Any], Any]
 
 
 class CombinedReducer(Generic[S]):
@@ -77,17 +138,18 @@ class CombinedReducer(Generic[S]):
 
     Unconfigured fields are retained. All children receive the same action and
     their own original field value, in keyword order. Children may themselves be
-    combined reducers. Child dispatch accepts BaseAction; handlers remain narrow.
+    combined reducers. Functions are routed by their action annotations;
+    unrelated actions are no-ops.
     """
 
     _state_type: type[S]
     _bindings: tuple[_FieldReducer, ...]
 
     def __init__(
-        self, state_type: type[S], /, **reducers: Callable[[Any, BaseAction], BaseState],
+        self, state_type: type[S], /, **reducers: Callable[[Any, Any], Any],
     ) -> None:
-        if not isinstance(state_type, type) or not issubclass(state_type, BaseState) or not is_dataclass(state_type):
-            raise DefinitionError("Combined state must be a BaseState dataclass class")
+        if not isinstance(state_type, type) or not is_dataclass(state_type):
+            raise DefinitionError("Combined state must be a dataclass class")
         self._state_type = state_type
         available = {field.name: field for field in fields(state_type)}
         try:
@@ -101,9 +163,11 @@ class CombinedReducer(Generic[S]):
                 raise DefinitionError(f"{context}: unknown dataclass field")
             if not available[name].init:
                 raise DefinitionError(f"{context}: cannot reduce a field with init=False")
-            allowed = classes(hints.get(name), BaseState, context)
+            allowed = classes(hints.get(name), context)
             synchronous(reducer, context)
-            if isinstance(reducer, MachineReducer):
+            if not isinstance(reducer, (FunctionReducer, MachineReducer, CombinedReducer)):
+                reducer = FunctionReducer(reducer)
+            if isinstance(reducer, (FunctionReducer, MachineReducer)):
                 reducer._validate_field(allowed, context)
             elif isinstance(reducer, CombinedReducer):
                 child_state = reducer._state_type
@@ -114,17 +178,15 @@ class CombinedReducer(Generic[S]):
             bindings.append(_FieldReducer(name, allowed, reducer))
         self._bindings = tuple(bindings)
 
-    def __call__(self, state: S, action: BaseAction) -> S:
+    def __call__(self, state: S, action: object) -> S:
         require(state, (self._state_type,), "combined reducer state")
-        require(action, (BaseAction,), "combined reducer action")
-        changes: dict[str, BaseState] = {}
+        changes: dict[str, object] = {}
         for binding in self._bindings:
             previous = getattr(state, binding.name)
             context = f"{self._state_type.__qualname__}.{binding.name}"
             require(previous, binding.states, f"{context} input")
             result = binding.reducer(previous, action)
-            if iscoroutine(result):
-                result.close()
+            synchronous_result(result, f"{context} result")
             require(result, binding.states, f"{context} result")
             if result is not previous:
                 changes[binding.name] = result
@@ -136,7 +198,7 @@ class CombinedReducer(Generic[S]):
 
 
 def combine_reducers(
-    state_type: type[S], /, **reducers: Callable[[Any, BaseAction], BaseState],
+    state_type: type[S], /, **reducers: Callable[[Any, Any], Any],
 ) -> CombinedReducer[S]:
     """Infer the root state type while wiring reducers to named dataclass fields."""
     return CombinedReducer(state_type, **reducers)

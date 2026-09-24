@@ -3,11 +3,11 @@ from typomata_redux import Middleware, MiddlewareContext, Store, StoreAPI, inter
 from consumer import Actions, Add, Count, Foreign, Logging, Root, plain_counter
 
 
-class BadState(Middleware[int, Actions]):  # type: ignore[type-var]  # pyright: ignore[reportInvalidTypeArguments]
+class ScalarState(Middleware[int, Actions]):
     pass
 
 
-class BadAction(Middleware[Count, str]):  # type: ignore[type-var]  # pyright: ignore[reportInvalidTypeArguments]
+class StringAction(Middleware[Count, str]):
     pass
 
 

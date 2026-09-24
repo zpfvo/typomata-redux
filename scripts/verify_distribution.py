@@ -1,4 +1,4 @@
-"""Build both projects; run tests and consumer checks outside the source tree.
+"""Verify the standalone core first, then the optional Typomata integration.
 
 Run using the project's development environment. uv, mypy and Pyright must be
 available; UV_CACHE_DIR can select a writable/cacheable dependency cache.
@@ -26,7 +26,6 @@ def main() -> None:
     with tempfile.TemporaryDirectory(prefix="typomata-redux-wheel-") as directory:
         temp = Path(directory)
         wheels = temp / "wheels"
-        run("uv", "build", "--out-dir", str(wheels), cwd=project.parent / "typomata")
         run("uv", "build", "--out-dir", str(wheels), cwd=project)
         archive = next(wheels.glob("typomata_redux-*.tar.gz"))
         with tarfile.open(archive) as source:
@@ -51,18 +50,30 @@ def main() -> None:
             assert any(name.endswith("/licenses/LICENSE") for name in built.namelist())
             metadata = next(name for name in built.namelist() if name.endswith("/METADATA"))
             assert b"Requires-Python: >=3.10" in built.read(metadata)
+            assert b"Requires-Dist: typomata" not in built.read(metadata)
         venv = temp / "venv"
         run("uv", "venv", "--python", sys.executable, str(venv), cwd=temp)
         python = venv / "bin" / "python"
-        typomata_wheel = next(wheels.glob("typomata-*.whl"))
-        run("uv", "pip", "install", "--python", str(python), str(typomata_wheel), str(wheel), cwd=temp)
-        run(str(python), "-c", "import typomata_redux; assert 'site-packages' in typomata_redux.__file__", cwd=temp)
-        run(str(python), "-m", "unittest", "discover", "-s", "tests", "-v", cwd=temp)
+        run("uv", "pip", "install", "--python", str(python), str(wheel), cwd=temp)
+        run(str(python), "-c", "import importlib.util, typomata_redux; "
+            "assert 'site-packages' in typomata_redux.__file__; "
+            "assert importlib.util.find_spec('typomata') is None", cwd=temp)
+        run(str(python), "-m", "unittest", "discover", "-s", "tests", "-p", "test_functions.py", "-v", cwd=temp)
         run(str(python), "examples/counter.py", cwd=temp)
         run(sys.executable, str(project / "scripts" / "verify_typing.py"),
             "--fixtures", str(temp / "tests" / "typing"),
             "--python-executable", str(python), cwd=temp)
-        print("Built-artifact tests, example, typing marker, license, and consumer checks passed.")
+        print("Standalone core verified without Typomata installed.", flush=True)
+
+        run("uv", "build", "--out-dir", str(wheels), cwd=project.parent / "typomata")
+        typomata_wheel = next(wheels.glob("typomata-*.whl"))
+        run("uv", "pip", "install", "--python", str(python), str(typomata_wheel), cwd=temp)
+        run(str(python), "-m", "unittest", "discover", "-s", "tests", "-v", cwd=temp)
+        run(str(python), "examples/typomata_counter.py", cwd=temp)
+        run(sys.executable, str(project / "scripts" / "verify_typing.py"),
+            "--fixtures", str(temp / "tests" / "typing_optional"),
+            "--python-executable", str(python), cwd=temp)
+        print("Built-artifact core and optional Typomata integration checks passed.")
 
 
 if __name__ == "__main__":

@@ -1,32 +1,30 @@
 from __future__ import annotations
 
-import inspect
 from threading import get_ident
 from typing import Callable, Generic, Iterable, TypeVar, cast
 
-from typomata import BaseAction, BaseState
-
 from ._recovery import call_boundary
-from ._validation import require, returns_none, synchronous
+from ._validation import returns_none, synchronous, synchronous_result
 from .errors import DispatchError
 from .middleware import Dispatch, MiddlewareFactory, StoreAPI
 
-S = TypeVar("S", bound=BaseState)
-A = TypeVar("A", bound=BaseAction)
+S = TypeVar("S")
+A = TypeVar("A")
 
 
 class Store(Generic[S, A]):
     """A synchronous store owned by the thread that constructed it.
 
-    S and A are static contracts. Runtime checks enforce the base classes, not
-    the generic arguments; validate external data before creating actions.
+    S and A are static contracts; states and actions need no marker base classes.
+    The store does not runtime-enforce generic arguments. FunctionReducer and
+    composition validate their declared state/results; plain root functions are
+    trusted. Validate external data before dispatching actions.
     """
 
     def __init__(
         self, *, initial_state: S, reducer: Callable[[S, A], S],
         middleware: Iterable[MiddlewareFactory[S, A]] = (),
     ) -> None:
-        require(initial_state, (BaseState,), "initial state")
         synchronous(reducer, "reducer")
         self._state = initial_state
         self._reducer = reducer
@@ -56,7 +54,6 @@ class Store(Generic[S, A]):
             self._check_access()
             if not self._ready:
                 raise DispatchError("Cannot dispatch while constructing middleware")
-            require(action, (BaseAction,), "dispatched action")
             returns_none(cast(Callable[[A], object], handler)(action), "middleware dispatch")
         return dispatch
 
@@ -75,9 +72,7 @@ class Store(Generic[S, A]):
         self._reducing = True
         try:
             candidate = self._reducer(self._state, action)
-            if inspect.iscoroutine(candidate):
-                candidate.close()
-            require(candidate, (BaseState,), "reducer result")
+            synchronous_result(candidate, "reducer result")
             self._state = candidate
         finally:
             self._reducing = False

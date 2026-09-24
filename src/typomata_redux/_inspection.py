@@ -12,7 +12,7 @@ from typing import Any
 
 from ._metadata import FieldInfo, MiddlewareInfo, ReducerInfo, StoreInfo
 from .middleware import Middleware
-from .reducers import CombinedReducer, MachineReducer
+from .reducers import CombinedReducer, FunctionReducer, MachineReducer
 from .store import Store
 
 
@@ -22,6 +22,8 @@ def _name(value: object) -> str:
 
 
 def describe_reducer(reducer: object) -> ReducerInfo:
+    if isinstance(reducer, FunctionReducer) and type(reducer).__call__ is FunctionReducer.__call__:
+        return ReducerInfo(name=reducer._info.name, kind="function", transitions=(reducer._info,))
     if isinstance(reducer, MachineReducer) and type(reducer).__call__ is MachineReducer.__call__:
         return ReducerInfo(
             name=_name(reducer._machine), kind="machine",

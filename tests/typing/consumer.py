@@ -6,43 +6,41 @@ verifies the diagnostic codes independently. This module is never executed.
 from dataclasses import dataclass
 
 from typing_extensions import assert_type
-from typomata import BaseAction, BaseState, BaseStateMachine, transition
-from typomata_redux import CombinedReducer, Dispatch, MachineReducer, Middleware, MiddlewareContext, Store, StoreAPI, combine_reducers, intercept, intercept_pre, intercept_post
+from typomata_redux import CombinedReducer, Dispatch, FunctionReducer, Middleware, MiddlewareContext, Store, StoreAPI, combine_reducers, intercept, intercept_pre, intercept_post
 
 
 @dataclass(frozen=True)
-class Count(BaseState):
+class Count:
     value: int = 0
 
 
 @dataclass(frozen=True)
-class Root(BaseState):
+class Root:
     count: Count = Count()
 
 
 @dataclass(frozen=True)
-class Nested(BaseState):
+class Nested:
     feature: Root = Root()
 
 
 @dataclass(frozen=True)
-class Add(BaseAction):
+class Add:
     amount: int = 1
 
 
-class Ignore(BaseAction):
+class Ignore:
     pass
 
 
-class Foreign(BaseAction):
+class Foreign:
     pass
 
 
 Actions = Add | Ignore
 
 
-class Counter(BaseStateMachine):
-    @transition
+class Counter:
     def add(self, state: Count, action: Add) -> Count:
         return Count(state.value + action.amount)
 
@@ -64,7 +62,7 @@ def passthrough(api: StoreAPI[Count, Actions], next_dispatch: Dispatch[Actions])
 
 
 def check() -> None:
-    reducer = MachineReducer[Count](Counter())
+    reducer = FunctionReducer(Counter().add)
     combined = combine_reducers(Root, count=reducer)
     assert_type(combined, CombinedReducer[Root])
     assert_type(combined(Root(), Add()), Root)
@@ -87,7 +85,7 @@ def check() -> None:
     assert_type(reducer(Count(), Foreign()), Count)
     reducer(Root(), Add())  # type: ignore[arg-type]  # pyright: ignore[reportArgumentType]
     Counter().add(Count(), Foreign())  # type: ignore[arg-type]  # pyright: ignore[reportArgumentType]
-    reducer(Count(), object())  # type: ignore[arg-type]  # pyright: ignore[reportArgumentType]
+    reducer(Count(), object())
     store.subscribe(lambda state: None)  # type: ignore[misc, arg-type]  # pyright: ignore[reportArgumentType]
     context = MiddlewareContext(store.get_state, store.dispatch, store.dispatch)
     Logging().log(event=Add(), context=context)
@@ -114,8 +112,8 @@ def check_automatic(api: StoreAPI[Count, Actions]) -> None:
     Automatic().after(action=Ignore(), ctx=api)  # type: ignore[arg-type]  # pyright: ignore[reportArgumentType]
 
 
-# A plain slice reducer must accept BaseAction; its body narrows before reading payloads.
-def plain_counter(state: Count, action: BaseAction) -> Count:
+# A plain slice reducer must accept object; its body narrows before reading payloads.
+def plain_counter(state: Count, action: object) -> Count:
     if isinstance(action, Add):
         return Count(state.value + action.amount)
     return state
@@ -131,7 +129,7 @@ def check_store_contract() -> None:
     assert_type(store.get_state(), Root)
     store.dispatch(Foreign())  # type: ignore[arg-type]  # pyright: ignore[reportArgumentType]
     store.dispatch(object())  # type: ignore[arg-type]  # pyright: ignore[reportArgumentType]
-    CombinedReducer[Root](Root, count=narrow_counter)  # type: ignore[arg-type]  # pyright: ignore[reportArgumentType]
+    CombinedReducer[Root](Root, count=narrow_counter)
     Store[Root, Actions](initial_state=Count(), reducer=root)  # type: ignore[arg-type]  # pyright: ignore[reportArgumentType]
     Store[Root, Actions](initial_state=Root(), reducer=plain_counter)  # type: ignore[arg-type]  # pyright: ignore[reportArgumentType]
 

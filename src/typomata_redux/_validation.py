@@ -7,22 +7,21 @@ from typing import Annotated, Any, Union, get_args, get_origin
 from .errors import DefinitionError
 
 
-def classes(hint: object, base: type, context: str) -> tuple[type, ...]:
+def classes(hint: object, context: str) -> tuple[type, ...]:
     """Normalize the small runtime annotation vocabulary we support."""
     origin = get_origin(hint)
     if origin is Annotated:
-        return classes(get_args(hint)[0], base, context)
+        return classes(get_args(hint)[0], context)
     if origin in (Union, UnionType):
         return tuple(dict.fromkeys(
-            member for arg in get_args(hint) for member in classes(arg, base, context)
+            member for arg in get_args(hint) for member in classes(arg, context)
         ))
     if (
         not isinstance(hint, type)
         or hint is Any
-        or not issubclass(hint, base)
         or getattr(hint, "_is_protocol", False)
     ):
-        raise DefinitionError(f"{context}: expected {base.__name__} classes or unions")
+        raise DefinitionError(f"{context}: expected concrete classes or unions (not Any, TypeVars, or parameterized types)")
     return (hint,)
 
 
@@ -53,3 +52,10 @@ def returns_none(value: object, context: str) -> None:
         if inspect.iscoroutine(value):
             value.close()
         raise TypeError(f"{context}: must return None, got {type(value).__qualname__}")
+
+
+def synchronous_result(value: object, context: str) -> None:
+    if inspect.iscoroutine(value) or inspect.isgenerator(value):
+        value.close()
+    if inspect.isawaitable(value) or inspect.isgenerator(value) or inspect.isasyncgen(value):
+        raise TypeError(f"{context}: a synchronous reducer must not return {type(value).__name__}")
