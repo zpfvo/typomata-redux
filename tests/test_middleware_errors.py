@@ -129,7 +129,10 @@ class ErrorTests(unittest.TestCase):
                     calls.append(True)
                     raise failure
 
-                subject = store(Forward()) if subscriber else store(Forward(), reducer=fail)
+                def fail_reducer(state: State, action: Actions) -> State:
+                    fail()
+
+                subject = store(Forward()) if subscriber else store(Forward(), reducer=fail_reducer)
                 if subscriber:
                     subject.subscribe(fail)
                 with self.assertNoLogs(LOGGER), self.assertRaises(type(failure)) as caught:
@@ -154,7 +157,7 @@ class ErrorTests(unittest.TestCase):
                                 raise translate
                             raise
 
-                def reducer(state, action):
+                def reducer(state: State, action: Actions) -> State:
                     if isinstance(action, Ignore):
                         raise original
                     return State(state.value + action.amount)
@@ -233,7 +236,7 @@ class ErrorTests(unittest.TestCase):
                                     calls.append('middleware')
                                     raise failure
 
-                        def reducer(state, action):
+                        def reducer(state: State, action: Actions) -> State:
                             calls.append(type(action).__name__)
                             if isinstance(action, Ignore) and failure_source == 'reducer':
                                 raise failure
@@ -275,7 +278,7 @@ class ErrorTests(unittest.TestCase):
                 except ValueError as error:
                     raise translated from error
 
-            def reducer(state, action):
+            def reducer(state: State, action: Actions) -> State:
                 if isinstance(action, Ignore):
                     raise original
                 return state
@@ -290,7 +293,7 @@ class ErrorTests(unittest.TestCase):
     def test_failure_in_another_store_protects_current_handler(self):
         failure = ValueError('other store reducer')
 
-        def fail(state, action):
+        def fail(state: State, action: Actions) -> State:
             raise failure
 
         other = store(reducer=fail)
@@ -324,7 +327,7 @@ class ErrorTests(unittest.TestCase):
                 except ValueError:
                     pass
 
-        def reducer(state, action):
+        def reducer(state: State, action: Actions) -> State:
             if isinstance(action, Ignore):
                 raise nested_failure
             return State(state.value + action.amount)
@@ -362,7 +365,7 @@ class ErrorTests(unittest.TestCase):
             else:
                 raise failure
 
-        def reducer(state, action):
+        def reducer(state: State, action: Actions) -> State:
             if isinstance(action, Ignore):
                 raise failure
             return State(state.value + action.amount)

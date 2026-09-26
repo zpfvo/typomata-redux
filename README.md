@@ -102,9 +102,10 @@ action, then earlier middleware resumes normally.
 `manual_actions=CounterAction` declares the actions this middleware must handle.
 Every used handler phase requires a [coverage declaration](#required-middleware-coverage).
 
-A plain root reducer is called directly for every dispatched action and must
-accept the store's action vocabulary. Use `FunctionReducer(counter)` if you want
-annotation-based filtering and result validation for a standalone reducer too.
+Pass annotated reducer functions directly to both `Store` and `combine_reducers`.
+Both adapt them automatically: unrelated actions preserve state identity, and
+state inputs and returned values are validated. A root reducer may accept a
+narrower action union than the store; dispatch retains the store's precise union.
 The [runnable example](examples/counter.py) composes two slices and dispatches a
 follow-up action from middleware.
 
@@ -201,8 +202,10 @@ scalar such as `int`, a dataclass, or a union of state classes. `Any`, unresolve
 names, generic TypeVars, parameterized types such as `list[Item]`, and protocols
 are rejected. Wrap collection state in a dataclass when needed. Unannotated
 lambdas, callable instances, partials, and async/generator reducers are not supported
-as automatically adapted slices. A plain root function is not subject to this
-annotation-inspection contract. Reducers must return state immediately; returned
+at either the root or a slice. Stores validate initial state before constructing
+middleware, without calling reducers. A function's result annotation must fit its
+accepted state types so the result can be passed back on the next dispatch.
+Reducers must return state immediately; returned
 awaitables and generators are rejected.
 
 Annotations resolve in module scope and, for bound methods, the declaring context
@@ -620,7 +623,7 @@ All names below are exported from `typomata_redux`. `S` denotes a state type and
 | `store.dispatch(action) -> None` | Dispatch synchronously through the entire chain. |
 | `store.get_state() -> S` | Read the current state object. |
 | `store.subscribe(listener) -> Callable[[], None]` | Register a no-argument listener and return an unsubscribe function. |
-| `FunctionReducer(function)` | Infer state typing and filter actions from function annotations; composition does this automatically. |
+| `FunctionReducer(function)` | Explicit adapter for standalone invocation; stores and composition adapt functions automatically. |
 | `combine_reducers(StateClass, field=reducer, ...)` | Infer the root type and compose dataclass slices. |
 | `CombinedReducer[S](StateClass, field=reducer, ...)` | Construct composition with an explicit root type. |
 | `Middleware[S, A]` | Annotated middleware base; declare `pre_actions`, `post_actions`, and/or `manual_actions` as class keywords for used phases. |
@@ -661,9 +664,8 @@ Runtime action and return-value checks can also raise `TypeError`. See
   type checkers still do not link the declarations. Declarations are snapshotted; rebinding a union
   alias later does not change an existing class's contract.
 - `Store[S, A]` does not inspect its generic arguments or require base-class markers.
-  Untyped callers can dispatch objects outside `A`. Adapted slices treat unmatched
-  actions as no-ops. A plain root function is trusted to accept the action and
-  return a valid state; use `FunctionReducer` for declared input/result checks.
+  Untyped callers can dispatch objects outside `A`. Adapted root and slice reducers
+  treat unmatched actions as no-ops and validate declared state/result types.
   Validate external data before dispatch.
 
 ### Sharing middleware type aliases
@@ -698,7 +700,7 @@ class ReportCount(CounterMiddleware, post_actions=Add):
 
 counter_store = Store[Count, CounterActions](
     initial_state=Count(),
-    reducer=FunctionReducer(counter),
+    reducer=counter,
     middleware=[ValidateAmount(), ReportCount()],
 )
 counter_store.dispatch(Add(2))  # Prints 2.
@@ -791,6 +793,15 @@ typing checks against the installed package with Typomata absent. CI runs these
 checks on Python 3.10–3.14.
 
 ## Migrating the earlier API
+
+Root reducers now use the same annotation and validation contract as composed
+slices. Replace unannotated lambdas with annotated functions. Unsupported callable
+instances, partials, parameterized annotations, and `Any` now fail at root store
+construction too. An unrelated action no longer invokes a narrow root function.
+Invalid initial state fails before middleware factories run, and invalid results
+fail before committing state. Existing `FunctionReducer` wrappers still work but
+are unnecessary when passing functions to `Store` or `combine_reducers`.
+
 
 From the previous version of this project:
 

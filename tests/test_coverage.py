@@ -133,7 +133,10 @@ class CoverageTests(unittest.TestCase):
                 ctx.next(action)
 
         self.assertEqual(events, [])
-        subject = Store(initial_state=0, reducer=lambda state, action: state + 1,
+        def increment(state: int, action: object) -> int:
+            return state + 1
+
+        subject = Store(initial_state=0, reducer=increment,
                         middleware=[Effects(events)])
         subject.dispatch(Add())
         subject.dispatch(Reset())
@@ -151,7 +154,10 @@ class CoverageTests(unittest.TestCase):
                 seen.append(action)
 
         action = SpecialAdd()
-        Store(initial_state=0, reducer=lambda state, action: state,
+        def unchanged(state: int, action: object) -> int:
+            return state
+
+        Store(initial_state=0, reducer=unchanged,
               middleware=[Effects()]).dispatch(action)
         self.assertEqual(seen, [action])
         with self.assertRaisesRegex(DefinitionError, 'missing pre handler for Add'):

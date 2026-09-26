@@ -43,7 +43,7 @@ class InspectionTests(unittest.TestCase):
             calls.append('factory')
             return next_dispatch
 
-        def reducer(state, action):
+        def reducer(state: State, action: Actions) -> State:
             calls.append('reducer')
             return state
 
@@ -58,7 +58,7 @@ class InspectionTests(unittest.TestCase):
         self.assertEqual(info.middleware[0], info.middleware[2])
         self.assertTrue(info.middleware[1].name.endswith('.plain'))
         self.assertEqual(info.middleware[1].handlers, ())
-        self.assertEqual(info.reducer.kind, 'opaque')
+        self.assertEqual(info.reducer.kind, 'function')
         handlers = info.middleware[0].handlers
         self.assertEqual([item.phase for item in handlers], ['pre', 'post'])
         self.assertEqual([item.actions for item in handlers], [(Add,), (Add, Ignore)])

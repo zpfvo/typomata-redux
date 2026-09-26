@@ -15,9 +15,9 @@ A = TypeVar("A")
 class FunctionReducer(Generic[S]):
     """Adapt an annotated function or bound method to accept unrelated actions.
 
-    combine_reducers applies this automatically. Explicit construction also works
-    for a standalone store. The function must declare two positional parameters
-    (state, action) and a result using concrete classes, unions, or Annotated.
+    Store and combine_reducers apply this automatically. The function must declare
+    two positional parameters (state, action) and a result using concrete classes,
+    unions, or Annotated.
     Action matching includes subclasses. Unmatched actions preserve state identity.
     State/result declarations are validated; annotations are resolved once.
     """
@@ -48,6 +48,9 @@ class FunctionReducer(Generic[S]):
             actions=classes(hints.get(parameters[1].name), f"{name} action"),
             destinations=classes(hints.get("return"), f"{name} result"),
         )
+        if not all(any(issubclass(dest, source) for source in self._info.sources)
+                   for dest in self._info.destinations):
+            raise DefinitionError(f"{name}: function result is outside its accepted state types")
 
         def invoke(state: S, action: object) -> S:
             return typed_reducer(state, cast(A, action))
@@ -61,13 +64,16 @@ class FunctionReducer(Generic[S]):
             raise DefinitionError(f"{context}: function result is outside the field state types")
 
     def __call__(self, state: S, action: object) -> S:
-        require(state, self._info.sources, f"{self._info.name} state")
+        self._validate_state(state)
         if not isinstance(action, self._info.actions):
             return state
         result = self._invoke(state, action)
         synchronous_result(result, f"{self._info.name} result")
         require(result, self._info.destinations, f"{self._info.name} result")
         return result
+
+    def _validate_state(self, state: object) -> None:
+        require(state, self._info.sources, f"{self._info.name} state")
 
 
 @dataclass(frozen=True)
@@ -76,7 +82,7 @@ class _FieldReducer:
     states: tuple[type, ...]
     # Different fields have different state types. Validate against the field's
     # annotation before/after crossing this deliberately erased state boundary.
-    reducer: Callable[[Any, Any], Any]
+    reducer: FunctionReducer[Any] | CombinedReducer[Any]
 
 
 class CombinedReducer(Generic[S]):
@@ -110,18 +116,19 @@ class CombinedReducer(Generic[S]):
             if not available[name].init:
                 raise DefinitionError(f"{context}: cannot reduce a field with init=False")
             allowed = classes(hints.get(name), context)
-            synchronous(reducer, context)
-            if not isinstance(reducer, (FunctionReducer, CombinedReducer)):
-                reducer = FunctionReducer(reducer)
-            if isinstance(reducer, FunctionReducer):
-                reducer._validate_field(allowed, context)
-            elif isinstance(reducer, CombinedReducer):
-                child_state = reducer._state_type
+            try:
+                adapted = _adapt(reducer)
+            except DefinitionError as error:
+                raise DefinitionError(f"{context}: {error}") from error
+            if isinstance(adapted, FunctionReducer):
+                adapted._validate_field(allowed, context)
+            else:
+                child_state = adapted._state_type
                 if not all(issubclass(item, child_state) for item in allowed):
                     raise DefinitionError(f"{context}: reducer does not accept every declared field state")
                 if not any(issubclass(child_state, item) for item in allowed):
                     raise DefinitionError(f"{context}: reducer state type exceeds the field state types")
-            bindings.append(_FieldReducer(name, allowed, reducer))
+            bindings.append(_FieldReducer(name, allowed, adapted))
         self._bindings = tuple(bindings)
 
     def __call__(self, state: S, action: object) -> S:
@@ -141,6 +148,19 @@ class CombinedReducer(Generic[S]):
         # Dataclasses' typing cannot express 'S is a dataclass'. The constructor
         # checked that constraint; replace preserves its concrete class.
         return cast(S, replace(cast(Any, state), **changes))
+
+    def _validate_state(self, state: object) -> None:
+        require(state, (self._state_type,), "combined reducer state")
+        for binding in self._bindings:
+            value = getattr(state, binding.name)
+            require(value, binding.states, f"{self._state_type.__qualname__}.{binding.name} input")
+            binding.reducer._validate_state(value)
+
+
+def _adapt(reducer: Callable[[S, A], S]) -> FunctionReducer[S] | CombinedReducer[S]:
+    if isinstance(reducer, (FunctionReducer, CombinedReducer)):
+        return reducer
+    return FunctionReducer(reducer)
 
 
 def combine_reducers(

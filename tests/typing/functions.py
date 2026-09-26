@@ -34,6 +34,18 @@ def invalid_result(state: Count, action: Add) -> Root:
 
 
 FunctionReducer(invalid_result)  # type: ignore[misc]  # pyright: ignore[reportArgumentType]
+Store[Count, Add](initial_state=Count(), reducer=invalid_result)  # type: ignore[arg-type]  # pyright: ignore[reportArgumentType]
+
+
+# Roots and slices both adapt narrow functions without losing the store vocabulary.
+def only_add(state: Count, action: Add) -> Count:
+    return Count(state.value + action.amount)
+
+
+standalone = Store[Count, Add | Ignore](initial_state=Count(), reducer=only_add)
+assert_type(standalone.get_state(), Count)
+standalone.dispatch(Ignore())
+standalone.dispatch(object())  # type: ignore[arg-type]  # pyright: ignore[reportArgumentType]
 
 
 class Service:

@@ -7,27 +7,30 @@ from ._recovery import call_boundary
 from ._validation import returns_none, synchronous, synchronous_result
 from .errors import DispatchError
 from .middleware import Dispatch, MiddlewareFactory, StoreAPI
+from .reducers import _adapt
 
 S = TypeVar("S")
 A = TypeVar("A")
+R = TypeVar("R")
 
 
 class Store(Generic[S, A]):
     """A synchronous store owned by the thread that constructed it.
 
     S and A are static contracts; states and actions need no marker base classes.
-    The store does not runtime-enforce generic arguments. FunctionReducer and
-    composition validate their declared state/results; plain root functions are
-    trusted. Validate external data before dispatching actions.
+    The store does not runtime-enforce generic arguments. Annotated reducer
+    functions are adapted just as in composition: unrelated actions are no-ops,
+    and declared state/results are validated. Validate external data before dispatch.
     """
 
     def __init__(
-        self, *, initial_state: S, reducer: Callable[[S, A], S],
+        self, *, initial_state: S, reducer: Callable[[S, R], S],
         middleware: Iterable[MiddlewareFactory[S, A]] = (),
     ) -> None:
-        synchronous(reducer, "reducer")
+        adapted = _adapt(reducer)
+        adapted._validate_state(initial_state)
         self._state = initial_state
-        self._reducer = reducer
+        self._reducer = adapted
         self._owner = get_ident()
         self._reducing = False
         self._ready = False
@@ -73,6 +76,7 @@ class Store(Generic[S, A]):
         try:
             candidate = self._reducer(self._state, action)
             synchronous_result(candidate, "reducer result")
+            self._reducer._validate_state(candidate)
             self._state = candidate
         finally:
             self._reducing = False

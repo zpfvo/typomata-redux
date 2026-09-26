@@ -190,7 +190,9 @@ class FunctionTests(unittest.TestCase):
             def __await__(self):
                 yield Count()
         for value in (generated(), Awaitable()):
-            subject = Store[Count, Add](initial_state=Count(), reducer=lambda state, action: value)
+            def lazy(state: Count, action: Add) -> Count:
+                return value
+            subject = Store[Count, Add](initial_state=Count(), reducer=lazy)
             with self.assertRaisesRegex(TypeError, 'synchronous reducer'):
                 subject.dispatch(Add())
             self.assertEqual(subject.get_state(), Count())
@@ -239,7 +241,9 @@ class FunctionTests(unittest.TestCase):
             return (state or 0) + 1
         reducer = combine_reducers(Scalar, value=count)
         self.assertEqual(reducer(Scalar(), 'anything'), Scalar(1))
-        subject = Store[int, str](initial_state=0, reducer=lambda state, action: state + len(action))
+        def length(state: int, action: str) -> int:
+            return state + len(action)
+        subject = Store[int, str](initial_state=0, reducer=length)
         subject.dispatch('add')
         self.assertEqual(subject.get_state(), 3)
 

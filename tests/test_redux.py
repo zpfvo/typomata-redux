@@ -224,7 +224,7 @@ class ReduxTests(unittest.TestCase):
     def test_reducer_reentrancy_blocked_before_middleware(self):
         events = []
 
-        def reducer(state, action):
+        def reducer(state: State, action: Actions) -> State:
             subject.dispatch(Add())
             return state
 
@@ -237,7 +237,7 @@ class ReduxTests(unittest.TestCase):
     def test_reducer_error_and_bad_result_preserve_state(self):
         failure = ValueError("domain error")
 
-        def fail(state, action):
+        def fail(state: State, action: Actions) -> State:
             raise failure
 
         subject = store(reducer=fail)
@@ -445,7 +445,7 @@ class ReduxTests(unittest.TestCase):
                          '    def handle(self, action: Add, ctx: Context) -> None: pass', globals())
 
     def test_async_plain_functions_rejected(self):
-        async def reducer(state, action):
+        async def reducer(state: State, action: Actions) -> State:
             return state
 
         async def listener():

@@ -125,7 +125,10 @@ class PhaseTests(unittest.TestCase):
             def fail(*args):
                 raise failure
 
-            subject = store(Post()) if failing_listener else store(Post(), reducer=fail)
+            def fail_reducer(state: State, action: Actions) -> State:
+                fail()
+
+            subject = store(Post()) if failing_listener else store(Post(), reducer=fail_reducer)
             if failing_listener:
                 subject.subscribe(fail)
             with self.assertRaises(ValueError) as caught:
