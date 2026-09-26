@@ -16,8 +16,11 @@ def classes(hint: object, context: str) -> tuple[type, ...]:
         return tuple(dict.fromkeys(
             member for arg in get_args(hint) for member in classes(arg, context)
         ))
+    # On Python 3.10, parameterized aliases such as list[int] can satisfy
+    # isinstance(hint, type). Only unions and Annotated are supported origins.
     if (
-        not isinstance(hint, type)
+        origin is not None
+        or not isinstance(hint, type)
         or hint is Any
         or getattr(hint, "_is_protocol", False)
     ):

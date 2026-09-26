@@ -215,12 +215,17 @@ class FunctionTests(unittest.TestCase):
     def test_unsupported_annotations_and_unresolved_names_fail_early(self):
         class ActionProtocol(Protocol):
             amount: int
-        for annotation in (Any, T, list[Add], ActionProtocol, 'MissingAction'):
-            def function(state: Count, action: Add) -> Count:
-                return state
-            function.__annotations__['action'] = annotation
-            with self.subTest(annotation=annotation), self.assertRaises(DefinitionError):
-                FunctionReducer(function)
+        for annotation in (
+            Any, T, list[Add], dict[str, Add], tuple[Add, ...],
+            Annotated[list[Add], 'items'], Add | list[Add],
+            Annotated[Add | list[Add], 'actions'], ActionProtocol, 'MissingAction',
+        ):
+            for role in ('state', 'action', 'return'):
+                def function(state: Count, action: Add) -> Count:
+                    return state
+                function.__annotations__[role] = annotation
+                with self.subTest(annotation=annotation, role=role), self.assertRaises(DefinitionError):
+                    FunctionReducer(function)
         def missing(state: Count, action: Add):
             return state
         with self.assertRaises(DefinitionError):

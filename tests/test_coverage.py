@@ -84,7 +84,12 @@ class CoverageTests(unittest.TestCase):
         class Structural(Protocol):
             pass
 
-        for annotation in (Any, list[Add], TypeVar('T'), Structural, 'Add', (Add,), (), False):
+        for annotation in (
+            Any, list[Add], dict[str, Add], tuple[Add, ...],
+            Annotated[list[Add], 'items'], Add | list[Add],
+            Annotated[Add | list[Add], 'actions'],
+            TypeVar('T'), Structural, 'Add', (Add,), (), False,
+        ):
             with self.subTest(annotation=annotation):
                 with self.assertRaisesRegex(DefinitionError, 'pre_actions: expected concrete classes'):
                     type('Invalid', (Middleware,), {}, pre_actions=annotation)
