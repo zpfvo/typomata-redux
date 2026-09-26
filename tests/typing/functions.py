@@ -46,6 +46,10 @@ standalone = Store[Count, Add | Ignore](initial_state=Count(), reducer=only_add)
 assert_type(standalone.get_state(), Count)
 standalone.dispatch(Ignore())
 standalone.dispatch(object())  # type: ignore[arg-type]  # pyright: ignore[reportArgumentType]
+covered = Store[Count, Add | Ignore](initial_state=Count(), reducer=counter,
+                                    required_actions=Add | Ignore)
+assert_type(covered.get_state(), Count)
+covered.dispatch(object())  # type: ignore[arg-type]  # pyright: ignore[reportArgumentType]
 
 
 class Service:

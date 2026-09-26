@@ -61,3 +61,4 @@ class MiddlewareInfo:
 class StoreInfo:
     middleware: tuple[MiddlewareInfo, ...]
     reducer: ReducerInfo
+    required_actions: tuple[type, ...] = ()

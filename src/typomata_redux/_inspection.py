@@ -48,4 +48,5 @@ def describe_store(store: Store[Any, Any]) -> StoreInfo:
     return StoreInfo(
         middleware=tuple(describe_middleware(factory) for factory in store._middleware),
         reducer=describe_reducer(store._reducer),
+        required_actions=store._required_actions,
     )

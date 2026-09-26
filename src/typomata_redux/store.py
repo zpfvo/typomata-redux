@@ -4,10 +4,10 @@ from threading import get_ident
 from typing import Callable, Generic, Iterable, TypeVar, cast
 
 from ._recovery import call_boundary
-from ._validation import returns_none, synchronous, synchronous_result
-from .errors import DispatchError
+from ._validation import classes, returns_none, synchronous, synchronous_result
+from .errors import DefinitionError, DispatchError
 from .middleware import Dispatch, MiddlewareFactory, StoreAPI
-from .reducers import _adapt
+from .reducers import _adapt, _registered_actions
 
 S = TypeVar("S")
 A = TypeVar("A")
@@ -21,14 +21,26 @@ class Store(Generic[S, A]):
     The store does not runtime-enforce generic arguments. Annotated reducer
     functions are adapted just as in composition: unrelated actions are no-ops,
     and declared state/results are validated. Validate external data before dispatch.
+
+    required_actions optionally declares actions that must have a reducer
+    registration somewhere in the root composition. Explicit no-op branches count;
+    effect-only actions can be left out. This checks declarations, not execution.
     """
 
     def __init__(
         self, *, initial_state: S, reducer: Callable[[S, R], S],
         middleware: Iterable[MiddlewareFactory[S, A]] = (),
+        required_actions: object = None,
     ) -> None:
         adapted = _adapt(reducer)
         adapted._validate_state(initial_state)
+        self._required_actions = () if required_actions is None else classes(required_actions, "required_actions")
+        if self._required_actions:
+            registered = _registered_actions(adapted)
+            missing = [action.__qualname__ for action in self._required_actions
+                       if not any(issubclass(action, accepted) for accepted in registered)]
+            if missing:
+                raise DefinitionError("Store: missing reducer for required actions: " + ", ".join(missing))
         self._state = initial_state
         self._reducer = adapted
         self._owner = get_ident()

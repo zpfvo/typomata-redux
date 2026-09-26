@@ -46,11 +46,13 @@ class AppState:
     history: History = History()
 
 
-def counter(state: Count, action: Add | Reset) -> Count:
+def counter(state: Count, action: Add | Reset | NoOp) -> Count:
     if isinstance(action, Add):
         return Count(state.value + action.amount)
     if isinstance(action, Reset):
         return Count()
+    if isinstance(action, NoOp):
+        return state
     assert_never(action)
 
 
@@ -83,6 +85,7 @@ class RecordChanges(Middleware[AppState, Actions], post_actions=Add):
 def main() -> None:
     store = Store[AppState, Actions](
         initial_state=AppState(), reducer=reduce,
+        required_actions=Actions,
         middleware=[Log(), RecordChanges()],
     )
     store.dispatch(Add(3))

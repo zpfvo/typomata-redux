@@ -151,7 +151,57 @@ does.
 Exhaustiveness is checked when you run a type checker; a union annotation alone
 does not require exhaustive branches. If execution reaches `assert_never`, it
 raises an `AssertionError`. The check covers the members of the declared union;
-it does not prove that every application action has a registered reducer.
+it does not by itself prove that every application action has a registered reducer.
+Use the construction-time coverage contract below to check that wiring as well.
+
+### Required reducer coverage
+
+Use `required_actions=...` on the store to check that every action expected to have
+a reducer is registered somewhere in its composition. For an application whose
+actions all belong to reducers, reuse the store's action union:
+
+```python
+checked_store = Store[Count, CounterAction](
+    initial_state=Count(), reducer=counter, required_actions=CounterAction,
+)
+```
+
+Construction checks the root function or all nested slices before running
+middleware factories. Adding an action to this union without registering it raises
+`DefinitionError: Store: missing reducer for required actions: ...`. Removing a
+slice that supplied its last registration also fails. Each slice keeps its own
+narrow action union; several slices may handle the same action.
+
+An intentional no-op should be included in a reducer's action annotation and have
+an explicit branch returning `state`. Keep `assert_never` to detect missing branches.
+Coverage examines annotations, not function bodies: accepting `object` covers all
+actions but gives up the protection of a closed action vocabulary.
+
+For effect-only actions, keep a separate reducer union and pass that as the
+contract. Building on the quick start:
+
+```python
+@dataclass(frozen=True)
+class RefreshRemote:
+    pass
+
+ReducerActions = CounterAction
+ApplicationActions = ReducerActions | RefreshRemote
+
+application = Store[Count, ApplicationActions](
+    initial_state=Count(), reducer=counter, required_actions=ReducerActions,
+)
+```
+
+The application can attach middleware for `RefreshRemote` without a reducer for
+it. Middleware registrations do not satisfy reducer coverage. This contract checks
+**registration, not execution**: middleware may still consume or replace an action,
+and a registered reducer may leave state unchanged. Omitting `required_actions`
+disables this additional check. It does not restrict runtime dispatch or inspect
+`Store`'s generic arguments. The contract is snapshotted at construction.
+Classes, unions, subclasses, and `Annotated` are supported. Reducer subclasses
+that replace `__call__` cannot claim coverage from the original registration
+metadata and are rejected when this check is requested.
 
 ## Combining reducers
 
@@ -619,7 +669,7 @@ All names below are exported from `typomata_redux`. `S` denotes a state type and
 
 | API | Purpose |
 | --- | --- |
-| `Store[S, A](initial_state=..., reducer=..., middleware=())` | Own state and assemble the middleware chain. |
+| `Store[S, A](initial_state=..., reducer=..., middleware=(), required_actions=None)` | Own state, assemble middleware, and optionally check reducer coverage. |
 | `store.dispatch(action) -> None` | Dispatch synchronously through the entire chain. |
 | `store.get_state() -> S` | Read the current state object. |
 | `store.subscribe(listener) -> Callable[[], None]` | Register a no-argument listener and return an unsubscribe function. |
@@ -645,6 +695,8 @@ Runtime action and return-value checks can also raise `TypeError`. See
 
 ## Static typing boundaries
 
+- `required_actions` checks root/nested reducer registrations at store construction.
+  It is a runtime contract, independent of static `assert_never` checks inside bodies.
 - Store dispatch, context dispatch, state access, and direct function/handler calls
   retain precise static types. A narrow function body can use `assert_never` to
   [check exhaustive handling](#exhaustive-action-handling) as its action union grows.

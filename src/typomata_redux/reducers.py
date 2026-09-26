@@ -163,6 +163,16 @@ def _adapt(reducer: Callable[[S, A], S]) -> FunctionReducer[S] | CombinedReducer
     return FunctionReducer(reducer)
 
 
+def _registered_actions(reducer: FunctionReducer[Any] | CombinedReducer[Any]) -> tuple[type, ...]:
+    if isinstance(reducer, FunctionReducer) and type(reducer).__call__ is FunctionReducer.__call__:
+        return reducer._info.actions
+    if isinstance(reducer, CombinedReducer) and type(reducer).__call__ is CombinedReducer.__call__:
+        return tuple(dict.fromkeys(
+            action for binding in reducer._bindings for action in _registered_actions(binding.reducer)
+        ))
+    raise DefinitionError("required_actions cannot verify a reducer with custom __call__ behavior")
+
+
 def combine_reducers(
     state_type: type[S], /, **reducers: Callable[[Any, Any], Any],
 ) -> CombinedReducer[S]:
