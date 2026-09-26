@@ -1,8 +1,17 @@
 # Typomata Redux
 
-Synchronous, typed Redux with annotation-based reducers and middleware. Write
-ordinary reducer functions, compose them over nested state, and keep side effects
-in middleware. State and action types need no marker base classes.
+A small, synchronous, typed Redux library for Python. Model actions and state with
+ordinary Python types, write transitions as functions, and organize side effects
+with middleware. Explicit action contracts help you catch incomplete handling as
+your application grows. State and action types need no marker base classes.
+
+The goal is to make application state changes **explicit, predictable, and type
+safe — with minimal ceremony**. Reducer composition keeps larger applications
+modular, while exhaustiveness checks help expose missing handlers when you add
+actions.
+
+The library owns dispatch, ordering, and validation. Your application owns its
+state, actions, and domain rules—including any state machine.
 
 The project name is still provisional.
 
@@ -328,11 +337,11 @@ Use `intercept_post` by default for effects that observe downstream results. Use
 need to consume, replace, or wrap an action. A post-handler observes the state after
 downstream returns; a later middleware may have consumed the action.
 
-| Decorator | Context | Forwarding | Typical use |
-| --- | --- | --- | --- |
-| `@intercept_post` | `StoreAPI[S, A]` | Downstream runs first | Default for effects observing downstream results. |
-| `@intercept_pre` | `StoreAPI[S, A]` | Automatic after the handler | Run an effect before downstream handling. |
-| `@intercept` | `MiddlewareContext[S, A]` | Explicit `ctx.next(action)` | Consume or replace actions, or compare state around forwarding. |
+| Decorator         | Context                   | Forwarding                  | Typical use                                                     |
+| ----------------- | ------------------------- | --------------------------- | --------------------------------------------------------------- |
+| `@intercept_post` | `StoreAPI[S, A]`          | Downstream runs first       | Default for effects observing downstream results.               |
+| `@intercept_pre`  | `StoreAPI[S, A]`          | Automatic after the handler | Run an effect before downstream handling.                       |
+| `@intercept`      | `MiddlewareContext[S, A]` | Explicit `ctx.next(action)` | Consume or replace actions, or compare state around forwarding. |
 
 All contexts expose `get_state()` and `dispatch(action)`. Only manual handlers
 receive `next(action)`. Both dispatch methods return `None`:
@@ -367,10 +376,10 @@ explicitly handles the exception.
 Every annotated middleware class must declare the actions each used phase handles:
 
 | Handler decorator | Required class keyword |
-| --- | --- |
-| `@intercept_pre` | `pre_actions=...` |
-| `@intercept_post` | `post_actions=...` |
-| `@intercept` | `manual_actions=...` |
+| ----------------- | ---------------------- |
+| `@intercept_pre`  | `pre_actions=...`      |
+| `@intercept_post` | `post_actions=...`     |
+| `@intercept`      | `manual_actions=...`   |
 
 Use an action class or a union; `Annotated` wrappers are also supported. Omit unused
 phases. Action classes can live in `counter/actions.py`, while the phase unions live
@@ -564,12 +573,12 @@ class Audit(Middleware[Count, Add], pre_actions=Add):
 Recovery logs the exception with its traceback to `typomata_redux.middleware`.
 It ends the failing handler; it does not resume its remaining statements.
 
-| Handler | After recovering its own exception |
-| --- | --- |
-| `intercept_pre` | Forward normally, then run its post-handler if downstream succeeds. |
-| `intercept_post` | Return normally, allowing earlier middleware to unwind. |
-| `intercept` before calling `next` | Forward the original action once. |
-| `intercept` after calling `next` successfully | Return without forwarding again. |
+| Handler                                       | After recovering its own exception                                  |
+| --------------------------------------------- | ------------------------------------------------------------------- |
+| `intercept_pre`                               | Forward normally, then run its post-handler if downstream succeeds. |
+| `intercept_post`                              | Return normally, allowing earlier middleware to unwind.             |
+| `intercept` before calling `next`             | Forward the original action once.                                   |
+| `intercept` after calling `next` successfully | Return without forwarding again.                                    |
 
 Returning normally from a manual handler without calling `next` still consumes
 an action, even with recovery enabled.
@@ -676,28 +685,28 @@ plain factories manage their own forwarding lifetimes.
 All names below are exported from `typomata_redux`. `S` denotes a state type and
 `A` an action type or union.
 
-| API | Purpose |
-| --- | --- |
-| `Store[S, A](initial_state=..., reducer=..., middleware=(), required_actions=None)` | Own state, assemble middleware, and optionally check reducer coverage. |
-| `store.dispatch(action) -> None` | Dispatch synchronously through the entire chain. |
-| `store.get_state() -> S` | Read the current state object. |
-| `store.subscribe(listener) -> Callable[[], None]` | Register a no-argument listener and return an unsubscribe function. |
-| `FunctionReducer(function)` | Explicit adapter for standalone invocation; stores and composition adapt functions automatically. |
-| `combine_reducers(StateClass, field=reducer, ...)` | Infer the root type and compose dataclass slices. |
-| `CombinedReducer[S]` | Concrete composition type returned by `combine_reducers`. |
-| `Middleware[S, A]` | Annotated middleware base; declare `pre_actions`, `post_actions`, and/or `manual_actions` as class keywords for used phases. |
-| `StoreAPI[S, A]` | Context exposing `get_state` and `dispatch`. |
-| `MiddlewareContext[S, A]` | Context also exposing one-use `next`. |
-| `intercept`, `intercept_pre`, `intercept_post` | Register handlers; each accepts `catch_exceptions=False`. |
-| `Dispatch[A]`, `MiddlewareFactory[S, A]` | Callable aliases for custom middleware. |
+| API                                                                                 | Purpose                                                                                                                      |
+| ----------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------- |
+| `Store[S, A](initial_state=..., reducer=..., middleware=(), required_actions=None)` | Own state, assemble middleware, and optionally check reducer coverage.                                                       |
+| `store.dispatch(action) -> None`                                                    | Dispatch synchronously through the entire chain.                                                                             |
+| `store.get_state() -> S`                                                            | Read the current state object.                                                                                               |
+| `store.subscribe(listener) -> Callable[[], None]`                                   | Register a no-argument listener and return an unsubscribe function.                                                          |
+| `FunctionReducer(function)`                                                         | Explicit adapter for standalone invocation; stores and composition adapt functions automatically.                            |
+| `combine_reducers(StateClass, field=reducer, ...)`                                  | Infer the root type and compose dataclass slices.                                                                            |
+| `CombinedReducer[S]`                                                                | Concrete composition type returned by `combine_reducers`.                                                                    |
+| `Middleware[S, A]`                                                                  | Annotated middleware base; declare `pre_actions`, `post_actions`, and/or `manual_actions` as class keywords for used phases. |
+| `StoreAPI[S, A]`                                                                    | Context exposing `get_state` and `dispatch`.                                                                                 |
+| `MiddlewareContext[S, A]`                                                           | Context also exposing one-use `next`.                                                                                        |
+| `intercept`, `intercept_pre`, `intercept_post`                                      | Register handlers; each accepts `catch_exceptions=False`.                                                                    |
+| `Dispatch[A]`, `MiddlewareFactory[S, A]`                                            | Callable aliases for custom middleware.                                                                                      |
 
-| Exception | Meaning |
-| --- | --- |
-| `CancelAction` | Raised by a handler to consume an action and unwind normally. |
-| `MiddlewareError` | Explicit failure that bypasses automatic recovery. |
-| `DefinitionError` | Invalid middleware or composition definition. |
-| `AmbiguousHandlerError` | Multiple handlers match where only one is allowed. |
-| `DispatchError` | Invalid store access or forwarding, such as a second `next` call. |
+| Exception               | Meaning                                                           |
+| ----------------------- | ----------------------------------------------------------------- |
+| `CancelAction`          | Raised by a handler to consume an action and unwind normally.     |
+| `MiddlewareError`       | Explicit failure that bypasses automatic recovery.                |
+| `DefinitionError`       | Invalid middleware or composition definition.                     |
+| `AmbiguousHandlerError` | Multiple handlers match where only one is allowed.                |
+| `DispatchError`         | Invalid store access or forwarding, such as a second `next` call. |
 
 Runtime action and return-value checks can also raise `TypeError`. See
 [exception handling](#middleware-exception-handling) for recovery boundaries.
