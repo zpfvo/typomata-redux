@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import FrozenInstanceError, dataclass
+from types import new_class
 from typing import Annotated, Any, Protocol, TypeVar, Union
 import unittest
 
@@ -45,7 +46,8 @@ def declare(decorator, annotation, **contracts):
         'action': annotation, 'ctx': Context if decorator is intercept else API,
         'return': None,
     }
-    return type('Effects', (Middleware,), {'handle': decorator(handle)}, **contracts)
+    return new_class('Effects', (Middleware[int, Actions],), contracts,
+                     lambda namespace: namespace.update(handle=decorator(handle)))
 
 
 class CoverageTests(unittest.TestCase):
@@ -152,7 +154,6 @@ class CoverageTests(unittest.TestCase):
         Store(initial_state=0, reducer=lambda state, action: state,
               middleware=[Effects()]).dispatch(action)
         self.assertEqual(seen, [action])
-        declare(intercept_pre, object, pre_actions=object)
         with self.assertRaisesRegex(DefinitionError, 'missing pre handler for Add'):
             declare(intercept_pre, SpecialAdd, pre_actions=Add)
 
@@ -273,7 +274,8 @@ class CoverageTests(unittest.TestCase):
 
         with self.assertRaisesRegex(DefinitionError, 'missing pre handler for Reset'):
             type('Invalid', (Middleware,), {'before': before}, pre_actions=Add | Reset)
-        valid = type('Valid', (Middleware,), {'before': before}, pre_actions=Add)
+        valid = new_class('Valid', (Middleware[int, Actions],), {'pre_actions': Add},
+                          lambda namespace: namespace.update(before=before))
         valid().before(Add(), API(lambda: 0, lambda action: None))
         with self.assertRaisesRegex(DefinitionError, 'missing pre handler for Reset'):
             type('InvalidChild', (valid,), {}, pre_actions=Add | Reset)
@@ -285,11 +287,9 @@ class CoverageTests(unittest.TestCase):
         vocabulary = Add | Reset
         pre = next(item for item in describe_middleware(subject()).coverage if item.phase == 'pre')
         self.assertEqual(pre.actions, (Add,))
-        # Store action parameters remain static contracts, independent of phase
-        # declarations. The existing owner/handler static gap is not closed here.
-        class ForeignVocabulary(Middleware[int, Reset], pre_actions=Add):
-            @intercept_pre
-            def before(self, action: Add, ctx: StoreAPI[int, Reset]) -> None:
-                pass
-
-        self.assertEqual(describe_middleware(ForeignVocabulary()).handlers[0].actions, (Add,))
+        # Phase vocabulary must now fit the middleware's declared action type.
+        with self.assertRaisesRegex(DefinitionError, 'outside Middleware action vocabulary'):
+            class ForeignVocabulary(Middleware[int, Reset], pre_actions=Add):
+                @intercept_pre
+                def before(self, action: Add, ctx: StoreAPI[int, Reset]) -> None:
+                    pass

@@ -1,4 +1,4 @@
-"""Desired rejection: handler context dispatch vocabulary contradicts its owner."""
+"""Static gap (runtime rejects at class definition): handler context dispatch vocabulary contradicts its owner."""
 from typomata_redux import Middleware, Store, StoreAPI, intercept_pre
 from consumer import Actions, Add, Count, Foreign, plain_counter
 

@@ -382,6 +382,23 @@ Clearing the declaration alone leaves those handlers invalid. Empty middleware
 classes need no declarations. Plain middleware factories use their own routing and
 are outside this coverage contract.
 
+### Middleware declaration consistency
+
+The `S` and `A` arguments of every handler context must match those of its owning
+`Middleware[S, A]`. Each phase declaration must be contained in `A`. Contradictions
+raise `DefinitionError` during class creation, including overrides and conflicting
+multiple-inheritance contracts. Union member order and `Annotated` metadata do not
+change this comparison. Concrete state and action arguments use the same supported
+class/union vocabulary as reducers; `Any` is rejected.
+
+Generic bases may use TypeVars for their state and context arguments. Subclasses
+substitute these through every inheritance level and are checked again. A directly
+specialized generic instance, such as `Effects[Count]()`, is checked when bound to
+a store, after Python has supplied its generic arguments. Unresolved generic
+handlers cannot be bound. Routed handler actions and phase coverage declarations
+still require concrete classes or unions. Use a concrete subclass when you want
+all checks to run at class definition.
+
 ## Automatic pre/post handlers
 
 Use `@intercept_pre` and `@intercept_post` when forwarding should be automatic:
@@ -634,12 +651,14 @@ Runtime action and return-value checks can also raise `TypeError`. See
   annotations to reject incompatible wiring.
 - Handler action/context annotations are not statically linked to their owning
   `Middleware[S, A]`. A handler in `Middleware[Count, Add]` can incorrectly declare
-  `StoreAPI[AppState, Add]` and pass mypy/Pyright, then fail reading `.count` from
-  the actual `Count`. Shared aliases below reduce repetition but do not enforce
-  that relationship. The known-gap fixtures keep these limits visible.
+  `StoreAPI[AppState, Add]` and pass mypy/Pyright. Class creation now rejects that
+  mismatch with `DefinitionError`, before any handler executes. Context state and
+  action arguments must match the owner after resolving aliases, union order,
+  `Annotated`, and inherited generic substitutions. The known-gap fixtures track
+  the remaining **static** limitation; runtime tests separately verify rejection.
 - Phase coverage declarations validate registrations at class definition. They
-  are independent of the store/context action generic and do not close the
-  owner/context typing gaps above. Declarations are snapshotted; rebinding a union
+  must fit the owning middleware's action vocabulary. This is a runtime guarantee;
+  type checkers still do not link the declarations. Declarations are snapshotted; rebinding a union
   alias later does not change an existing class's contract.
 - `Store[S, A]` does not inspect its generic arguments or require base-class markers.
   Untyped callers can dispatch objects outside `A`. Adapted slices treat unmatched
@@ -692,9 +711,9 @@ Each handler can still select a narrow action such as `Add`, while context dispa
 accepts the full `CounterActions` union. Subclassing the alias also leaves normal
 constructors and injected instance attributes available.
 
-These aliases reduce opportunities for inconsistent annotations; they do not add a
-new static guarantee. Both context aliases must still agree with `CounterMiddleware`,
-and a handler can still accidentally use a context alias from another application.
+These aliases reduce repetition. Both context aliases must agree with
+`CounterMiddleware`; a mismatched context from another application now fails at
+class definition. This adds a runtime guarantee, not a new static guarantee.
 
 ## Dispatch contract
 

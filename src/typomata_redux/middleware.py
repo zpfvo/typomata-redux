@@ -5,10 +5,11 @@ import sys
 from dataclasses import dataclass
 from functools import wraps
 from inspect import Parameter, Signature, isfunction, signature
-from typing import Any, Callable, Generic, Literal, TypeVar, cast, get_origin, get_type_hints, overload
+from typing import Any, Callable, Generic, Literal, TypeVar, cast, get_args, get_origin, get_type_hints, overload
 
 from typing_extensions import ParamSpec, TypeAlias
 
+from ._contracts import agree, concrete, inheritance, members
 from ._metadata import InterceptorInfo, Phase, PhaseCoverage
 from ._recovery import Invocation, protect
 from ._validation import classes, require, returns_none, synchronous
@@ -49,6 +50,9 @@ MiddlewareFactory: TypeAlias = Callable[[StoreAPI[S, A], Dispatch[A]], Dispatch[
 class _Handler:
     info: InterceptorInfo
     original: Callable[..., None]
+    owner: type
+    context_state: object
+    context_actions: object
 
     def _validate(self, action: object, ctx: object) -> None:
         require(action, self.info.actions, self.info.name)
@@ -231,6 +235,7 @@ def _resolve(owner: type, name: str, decl: _Declaration) -> _Handler:
         raise DefinitionError(f"{context}: return annotation must be None")
     return _Handler(
         InterceptorInfo(context, actions, decl.phase, decl.catch_exceptions), decl.original,
+        owner, *get_args(ctx),
     )
 
 
@@ -282,6 +287,41 @@ def _validate_coverage(owner: type, coverage: tuple[PhaseCoverage, ...], handler
             )
 
 
+def _validate_owner(
+    owner: object, handlers: tuple[_Handler, ...], coverage: tuple[PhaseCoverage, ...],
+    *, binding: bool = False,
+) -> None:
+    cls = get_origin(owner) or owner
+    label = getattr(cls, '__qualname__', 'Middleware')
+    paths = inheritance(owner, Middleware)
+    contracts = [(members(S, path), members(A, path)) for path in paths.get(Middleware, [{}])]
+    for state, actions in contracts:
+        declared_state = concrete(state, f'{label} state')
+        declared_actions = concrete(actions, f'{label} actions')
+        if handlers and (declared_state is None or declared_actions is None):
+            if binding or not getattr(cls, '__parameters__', ()):
+                raise DefinitionError(f'{label}: specify concrete Middleware[S, A] arguments before binding')
+        for other_state, other_actions in contracts:
+            agree(state, other_state, f'{label} inherited state')
+            agree(actions, other_actions, f'{label} inherited actions')
+        if declared_actions is not None:
+            for phase in coverage:
+                for action in phase.actions:
+                    if not any(issubclass(action, allowed) for allowed in declared_actions):
+                        raise DefinitionError(
+                            f'{label}.{phase.phase}_actions: {action.__qualname__} is outside Middleware action vocabulary'
+                        )
+        for handler in handlers:
+            for path in paths.get(handler.owner, [{}]):
+                for hint, expected, role in ((handler.context_state, state, 'state'),
+                                             (handler.context_actions, actions, 'actions')):
+                    resolved = members(hint, path)
+                    context = f'{handler.info.name} context {role}'
+                    if concrete(resolved, context) is None and (binding or not getattr(cls, '__parameters__', ())):
+                        raise DefinitionError(f'{context}: unresolved TypeVars')
+                    agree(resolved, expected, context)
+
+
 class Middleware(Generic[S, A]):
     """Action-selected handlers, composed in the store's declared order.
 
@@ -292,6 +332,11 @@ class Middleware(Generic[S, A]):
     Subclasses inherit contracts from their direct bases and are revalidated;
     an explicit keyword replaces that phase, and None clears it. A cleared phase
     must have no registered handlers. Constructors remain application-owned.
+
+    Context state/action arguments must agree with Middleware[S, A]; each phase's
+    vocabulary must fit A. Generic base arguments are substituted through the
+    inheritance graph. Deferred generic instance contracts are checked on binding
+    to a store. These are runtime definition checks, not static typing guarantees.
 
     Consumption stops forwarding, not normal unwinding. For example::
 
@@ -357,12 +402,15 @@ class Middleware(Generic[S, A]):
             _phase_coverage(cls, "post", post_actions),
         )
         _validate_coverage(cls, coverage, handlers)
+        _validate_owner(cls, tuple(handlers), coverage)
         for decl, owner, handler in pending:
             decl.definitions[owner] = handler
         cls._handlers = tuple(handlers)
         cls._coverage = coverage
 
     def __call__(self, api: StoreAPI[S, A], next_dispatch: Dispatch[A]) -> Dispatch[A]:
+        _validate_owner(getattr(self, '__orig_class__', type(self)), self._handlers, self._coverage, binding=True)
+
         def dispatch(action: A) -> None:
             matches = [handler for handler in self._handlers if isinstance(action, handler.info.actions)]
             if not matches:

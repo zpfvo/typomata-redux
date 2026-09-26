@@ -1,4 +1,4 @@
-"""Desired rejection: handler context state contradicts its owner. Review item 2."""
+"""Static gap (runtime rejects at class definition): handler context state contradicts its owner."""
 from typomata_redux import Middleware, Store, StoreAPI, intercept_pre
 from consumer import Actions, Add, Count, Root, plain_counter
 

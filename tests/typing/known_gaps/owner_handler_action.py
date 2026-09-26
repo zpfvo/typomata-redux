@@ -1,4 +1,4 @@
-"""Desired rejection: routed handler action is outside the owner's vocabulary."""
+"""Static gap (runtime rejects at class definition): routed handler action is outside the owner's vocabulary."""
 from typomata_redux import Middleware, Store, StoreAPI, intercept_pre
 from consumer import Actions, Count, Foreign, plain_counter
 

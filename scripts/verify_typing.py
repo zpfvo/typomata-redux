@@ -105,7 +105,7 @@ def verify(fixtures: Path, python: Path) -> None:
             lines = {(name, line) for name, line, _ in expected[checker]}
             print(f'{checker}: positive fixtures and {len(lines)} negative lines verified.')
         for gap in gaps:
-            print(f'KNOWN GAP (not rejected by either checker): {gap.stem}')
+            print(f'KNOWN STATIC GAP (runtime rejects the declaration): {gap.stem}')
 
 
 def main() -> None:
