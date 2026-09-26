@@ -7,7 +7,7 @@ in middleware. State and action types need no marker base classes.
 The project name is still provisional.
 
 - [Setup](#setup), [quick start](#quick-start), and [exhaustive action handling](#exhaustive-action-handling)
-- [Combining reducers](#combining-reducers) and [calling domain logic](#calling-domain-logic-from-reducers)
+- [Combining reducers](#combining-reducers), [required reducer coverage](#required-reducer-coverage), and [calling domain logic](#calling-domain-logic-from-reducers)
 - [Choosing middleware](#choosing-a-middleware-decorator) and [passing dependencies](#passing-dependencies-to-middleware)
 - [Required middleware coverage](#required-middleware-coverage)
 - [Exception handling](#middleware-exception-handling), [subscriptions](#subscriptions), and [async work](#async-work)
@@ -53,13 +53,14 @@ uv run --no-dev python examples/counter.py
 
 ## Quick start
 
-This complete example defines plain state/action dataclasses, a reducer, and manual
-middleware. The reducer's action union stays narrow and supports exhaustive checking:
+This complete example defines plain state/action dataclasses, a reducer, and an
+automatic post-handler. Start with `intercept_post` for effects that observe
+downstream results. The reducer's action union supports exhaustive checking:
 
 ```python
 from dataclasses import dataclass
 from typing_extensions import assert_never
-from typomata_redux import FunctionReducer, Middleware, MiddlewareContext, Store, intercept
+from typomata_redux import Middleware, Store, StoreAPI, intercept_post
 
 @dataclass(frozen=True)
 class Count:
@@ -82,25 +83,24 @@ def counter(state: Count, action: CounterAction) -> Count:
         return Count()
     assert_never(action)
 
-class Log(Middleware[Count, CounterAction], manual_actions=CounterAction):
-    @intercept
-    def log(self, action: CounterAction, ctx: MiddlewareContext[Count, CounterAction]) -> None:
-        print("before", ctx.get_state())
-        ctx.next(action)
+class Log(Middleware[Count, CounterAction], post_actions=CounterAction):
+    @intercept_post
+    def log(self, action: CounterAction, ctx: StoreAPI[Count, CounterAction]) -> None:
         print("after", ctx.get_state())
 
 store = Store[Count, CounterAction](
     initial_state=Count(), reducer=counter, middleware=[Log()],
+    required_actions=CounterAction,
 )
 store.dispatch(Add(2))  # Returns None.
 assert store.get_state() == Count(2)
 ```
 
 `Store[S, A]` exposes `get_state() -> S` and `dispatch(action: A) -> None`.
-`ctx.next(action)` forwards downstream. Returning without calling it consumes the
-action, then earlier middleware resumes normally.
-`manual_actions=CounterAction` declares the actions this middleware must handle.
-Every used handler phase requires a [coverage declaration](#required-middleware-coverage).
+Forwarding is automatic here. `post_actions=CounterAction` declares the actions
+this middleware must handle; `required_actions=CounterAction` checks that the
+store has reducer registrations for them. Every used handler phase requires a
+[coverage declaration](#required-middleware-coverage).
 
 Pass annotated reducer functions directly to both `Store` and `combine_reducers`.
 Both adapt them automatically: unrelated actions preserve state identity, and
@@ -269,11 +269,11 @@ inputs and function results. These checks are shallow and do not prove purity or
 deep immutability. Exceptions from matching functions propagate, never become
 no-ops, and prevent the root state from being committed.
 
-Existing `FunctionReducer` and `CombinedReducer` instances can also be passed as
-children. For explicit root typing use
-`CombinedReducer[AppState](AppState, count=counter)`. The helper infers that type
-from `AppState`. Adapted and combined reducers accept `object`; the store retains
-its own precise action union.
+Use `combine_reducers` to construct compositions; it infers the root state type
+from the dataclass. Existing adapted or combined reducers can also be children.
+`CombinedReducer[S]` names the returned type when an annotation is needed.
+Adapted and combined reducers accept `object`; explicitly parameterize the store
+as `Store[S, A]` to retain its intended action union at dispatch.
 
 Rebuilding uses `dataclasses.replace`, including constructor/`__post_init__` behavior.
 Fields with `init=False` cannot be targeted and may be recomputed. Required `InitVar`
@@ -323,10 +323,15 @@ internal transitions of helpers or external state machines.
 
 ## Choosing a middleware decorator
 
+Use `intercept_post` by default for effects that observe downstream results. Use
+`intercept_pre` when work must happen before forwarding, and `intercept` when you
+need to consume, replace, or wrap an action. A post-handler observes the state after
+downstream returns; a later middleware may have consumed the action.
+
 | Decorator | Context | Forwarding | Typical use |
 | --- | --- | --- | --- |
+| `@intercept_post` | `StoreAPI[S, A]` | Downstream runs first | Default for effects observing downstream results. |
 | `@intercept_pre` | `StoreAPI[S, A]` | Automatic after the handler | Run an effect before downstream handling. |
-| `@intercept_post` | `StoreAPI[S, A]` | Downstream runs first | React to an action using the resulting observable state. |
 | `@intercept` | `MiddlewareContext[S, A]` | Explicit `ctx.next(action)` | Consume or replace actions, or compare state around forwarding. |
 
 All contexts expose `get_state()` and `dispatch(action)`. Only manual handlers
@@ -340,6 +345,8 @@ receive `next(action)`. Both dispatch methods return `None`:
 To compare state before and after downstream handling:
 
 ```python
+from typomata_redux import MiddlewareContext, intercept
+
 class ObserveCount(Middleware[Count, Add], manual_actions=Add):
     @intercept
     def observe(self, action: Add, ctx: MiddlewareContext[Count, Add]) -> None:
@@ -459,7 +466,7 @@ Use `@intercept_pre` and `@intercept_post` when forwarding should be automatic:
 ```python
 from typomata_redux import StoreAPI, intercept_pre, intercept_post
 
-class Log(Middleware[Count, Add], pre_actions=Add, post_actions=Add):
+class LogBoth(Middleware[Count, Add], pre_actions=Add, post_actions=Add):
     @intercept_pre
     def before(self, action: Add, ctx: StoreAPI[Count, Add]) -> None:
         print("before", ctx.get_state())
@@ -519,12 +526,12 @@ class SaveCount(Middleware[Count, Add], post_actions=Add):
 database = sqlite3.connect(":memory:")
 try:
     database.execute("CREATE TABLE counts (value INTEGER NOT NULL)")
-    store = Store[Count, Add](
+    persistent_store = Store[Count, Add](
         initial_state=Count(),
         reducer=counter,
         middleware=[SaveCount(database)],
     )
-    store.dispatch(Add(2))
+    persistent_store.dispatch(Add(2))
     assert database.execute("SELECT value FROM counts").fetchall() == [(2,)]
 finally:
     database.close()
@@ -643,8 +650,10 @@ dispatch back onto that thread using the application's scheduling mechanism.
 
 ## Plain middleware
 
-For custom composition, a factory receives `(api, next_dispatch)` and returns a
-synchronous action handler. This two-argument form avoids nested factory closures:
+Prefer annotated `Middleware` for application effects, including its coverage
+checks and forwarding guards. For custom integrations, a plain factory receives
+`(api, next_dispatch)` and returns a synchronous action handler. This two-argument
+form avoids nested factory closures:
 
 ```python
 from typomata_redux import Dispatch, StoreAPI
@@ -675,7 +684,7 @@ All names below are exported from `typomata_redux`. `S` denotes a state type and
 | `store.subscribe(listener) -> Callable[[], None]` | Register a no-argument listener and return an unsubscribe function. |
 | `FunctionReducer(function)` | Explicit adapter for standalone invocation; stores and composition adapt functions automatically. |
 | `combine_reducers(StateClass, field=reducer, ...)` | Infer the root type and compose dataclass slices. |
-| `CombinedReducer[S](StateClass, field=reducer, ...)` | Construct composition with an explicit root type. |
+| `CombinedReducer[S]` | Concrete composition type returned by `combine_reducers`. |
 | `Middleware[S, A]` | Annotated middleware base; declare `pre_actions`, `post_actions`, and/or `manual_actions` as class keywords for used phases. |
 | `StoreAPI[S, A]` | Context exposing `get_state` and `dispatch`. |
 | `MiddlewareContext[S, A]` | Context also exposing one-use `next`. |
@@ -728,7 +737,7 @@ from repeatedly spelling out the state and action union. Building on the quick s
 
 ```python
 from typing import TypeAlias
-from typomata_redux import StoreAPI, intercept_post
+from typomata_redux import MiddlewareContext, StoreAPI, intercept, intercept_post
 
 class NoOp:
     pass
@@ -853,7 +862,6 @@ construction too. An unrelated action no longer invokes a narrow root function.
 Invalid initial state fails before middleware factories run, and invalid results
 fail before committing state. Existing `FunctionReducer` wrappers still work but
 are unnecessary when passing functions to `Store` or `combine_reducers`.
-
 
 From the previous version of this project:
 
