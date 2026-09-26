@@ -11,7 +11,7 @@ modular, while exhaustiveness checks help expose missing handlers when you add
 actions.
 
 The library owns dispatch, ordering, and validation. Your application owns its
-state, actions, and domain rules—including any state machine.
+state, actions, and domain rules.
 
 The project name is still provisional.
 
@@ -291,9 +291,9 @@ be rolled back; keep reducers pure.
 
 ## Calling domain logic from reducers
 
-Reducers can call pure helper functions, bound methods, or an application-owned
-state machine. Their ordinary state/action/result annotations remain the library's
-interface. For example, building on the quick start and composition examples:
+Reducers can call pure helper functions or bound methods. Their ordinary
+state/action/result annotations remain the library's interface. For example,
+building on the quick start and composition examples:
 
 ```python
 from typomata_redux import combine_reducers
@@ -317,18 +317,6 @@ reducer = combine_reducers(AppState, count=counter_with_logic)
 The wrapper preserves exhaustive action handling and lets composition filter
 unrelated actions. Pure bound methods can also be passed directly as slice reducers
 when their annotated signatures fit the field.
-
-If using a state-machine library, the application installs and configures it, then
-calls it from a reducer using the same pattern. Store the machine's current state
-value in Redux state; keep its behavior object outside that state. Transitions must
-be pure and return state values without mutating existing snapshots. The reducer
-must accept every state variant declared for its slice and decide when a state/action
-pair should be a no-op. Engine errors propagate unless the application handles them
-explicitly. If an engine returns a broad state type, validate and narrow its result
-before returning it from a reducer with a more specific annotation.
-
-Inspection describes the reducer's own declarations. It does not inspect the
-internal transitions of helpers or external state machines.
 
 ## Choosing a middleware decorator
 
@@ -847,8 +835,7 @@ uv build
 uv run --locked python scripts/verify_distribution.py
 ```
 
-The development group contains only the type checkers. No sibling repository or
-state-machine package is required.
+The development group contains only the type checkers.
 
 `verify_typing.py` verifies valid consumers and explicit negative cases independently
 with mypy and Pyright. It copies fixtures outside the source tree, removes both
@@ -859,8 +846,7 @@ fixture and documented limitation can be reviewed.
 
 Distribution verification builds a wheel from the source archive and installs it
 in a clean environment. It runs the entire runtime suite, example, and consumer
-typing checks against the installed package with Typomata absent. CI runs these
-checks on Python 3.10–3.14.
+typing checks against the installed package. CI runs these checks on Python 3.10–3.14.
 
 ## Migrating the earlier API
 
@@ -886,10 +872,6 @@ From the previous version of this project:
   previously accepted by composition now fail at construction.
 - State and action types need no marker base classes. Existing subclasses remain
   ordinary Python types. Use `object` for a handler accepting all actions.
-- `MachineReducer` and the built-in Typomata integration have been removed. Replace
-  adapter instances with annotated reducer functions that call your domain logic.
-  Define any state-dependent no-op behavior explicitly; direct engine calls may
-  raise for unmatched transitions. See [calling domain logic](#calling-domain-logic-from-reducers).
 - Generic state/action contracts are static. The former runtime base-class checks
   are removed; validate untyped external data explicitly.
 
@@ -899,9 +881,8 @@ factory or action-union inference from the application's slices.
 
 ## Scope
 
-The working name remains `typomata-redux`. State-machine use belongs to application
-reducers. Internal inspection describes function reducers, middleware handlers,
-and nested composition using dispatch's own declarations.
-Plain root callables and custom dispatch overrides remain opaque. Inspection does
-not execute handlers or predict side effects, and its metadata has no public
-stability guarantee. Static action-handler diagrams remain the final planned feature.
+The working name remains `typomata-redux`. Internal inspection describes function
+reducers, middleware handlers, and nested composition using dispatch's own
+declarations. Custom dispatch overrides remain opaque. Inspection does not execute
+handlers or predict side effects, and its metadata has no public stability
+guarantee. Static action-handler diagrams remain the final planned feature.
