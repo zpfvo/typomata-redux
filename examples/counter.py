@@ -64,7 +64,7 @@ def recorder(state: History, action: Remember | Reset) -> History:
 
 reduce = combine_reducers(AppState, count=counter, history=recorder)
 
-class Log(Middleware[AppState, Actions]):
+class Log(Middleware[AppState, Actions], pre_actions=Actions, post_actions=Actions):
     @intercept_pre
     def before(self, action: Actions, ctx: StoreAPI[AppState, Actions]) -> None:
         print("before", type(action).__name__, ctx.get_state())
@@ -74,7 +74,7 @@ class Log(Middleware[AppState, Actions]):
         print("after", type(action).__name__, ctx.get_state())
 
 
-class RecordChanges(Middleware[AppState, Actions]):
+class RecordChanges(Middleware[AppState, Actions], post_actions=Add):
     @intercept_post
     def add(self, action: Add, ctx: StoreAPI[AppState, Actions]) -> None:
         ctx.dispatch(Remember(ctx.get_state().count.value))

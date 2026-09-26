@@ -3,16 +3,15 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 import unittest
 
-from typomata import BaseAction, BaseState, BaseStateMachine, transition
-from typomata_redux import CombinedReducer, DefinitionError, MachineReducer, Store, combine_reducers
+from typomata_redux import CombinedReducer, DefinitionError, FunctionReducer, Store, combine_reducers
 
 
 @dataclass(frozen=True)
-class Add(BaseAction):
+class Add:
     amount: int = 1
 
 
-class Ignore(BaseAction):
+class Ignore:
     pass
 
 
@@ -20,51 +19,39 @@ Actions = Add | Ignore
 
 
 @dataclass(frozen=True)
-class Count(BaseState):
+class Count:
     value: int = 0
 
 
 @dataclass(frozen=True)
-class History(BaseState):
+class History:
     entries: tuple[int, ...] = ()
 
 
 @dataclass(frozen=True)
-class Root(BaseState):
+class Root:
     count: Count = Count()
     history: History = History()
     label: str = "unchanged"
 
 
 @dataclass(frozen=True)
-class Nested(BaseState):
+class Nested:
     feature: Root = Root()
     other: Count = Count()
 
 
-class Counter(BaseStateMachine):
-    @transition
-    def add(self, state: Count, action: Add) -> Count:
-        return Count(state.value + action.amount)
+def counter(state: Count, action: Add) -> Count:
+    return Count(state.value + action.amount)
 
 
-class Recorder(BaseStateMachine):
-    @transition
-    def add(self, state: History, action: Add) -> History:
-        return History((*state.entries, action.amount))
-
-
-def counter():
-    return MachineReducer[Count](Counter())
-
-
-def recorder():
-    return MachineReducer[History](Recorder())
+def recorder(state: History, action: Add) -> History:
+    return History((*state.entries, action.amount))
 
 
 class CombineTests(unittest.TestCase):
     def test_routes_action_to_every_configured_field(self):
-        reducer = combine_reducers(Root, count=counter(), history=recorder())
+        reducer = combine_reducers(Root, count=counter, history=recorder)
         old = Root(label="keep me")
         action = Add(4)
         result = reducer(old, action)
@@ -72,12 +59,12 @@ class CombineTests(unittest.TestCase):
         self.assertEqual(old, Root(label="keep me"))
 
     def test_noop_preserves_root_identity(self):
-        reducer = combine_reducers(Root, count=counter(), history=recorder())
+        reducer = combine_reducers(Root, count=counter, history=recorder)
         old = Root()
         self.assertIs(reducer(old, Ignore()), old)
 
     def test_unconfigured_and_unchanged_fields_are_shared(self):
-        reducer = combine_reducers(Root, count=counter())
+        reducer = combine_reducers(Root, count=counter)
         old = Root()
         new = reducer(old, Add())
         self.assertIsNot(new, old)
@@ -101,7 +88,7 @@ class CombineTests(unittest.TestCase):
         self.assertIs(reducer(old, Add()), old)
 
     def test_nested_composition_preserves_unchanged_branches(self):
-        feature = combine_reducers(Root, count=counter(), history=recorder())
+        feature = combine_reducers(Root, count=counter, history=recorder)
         reducer = combine_reducers(Nested, feature=feature)
         old = Nested()
         new = reducer(old, Add(3))
@@ -136,7 +123,7 @@ class CombineTests(unittest.TestCase):
         old = Root()
         subject = Store[Root, Actions](
             initial_state=old,
-            reducer=combine_reducers(Root, count=counter(), history=fails),
+            reducer=combine_reducers(Root, count=counter, history=fails),
         )
         with self.assertRaises(ValueError) as caught:
             subject.dispatch(Add())
@@ -146,49 +133,39 @@ class CombineTests(unittest.TestCase):
 
     def test_unknown_field_and_non_state_field_rejected(self):
         with self.assertRaisesRegex(DefinitionError, "unknown dataclass field"):
-            combine_reducers(Root, coutn=counter())
+            combine_reducers(Root, coutn=counter)
         with self.assertRaises(DefinitionError):
-            combine_reducers(Root, label=counter())
+            combine_reducers(Root, label=counter)
 
-    def test_mismatched_adapter_rejected_at_construction(self):
+    def test_mismatched_function_adapter_rejected_at_construction(self):
         with self.assertRaisesRegex(DefinitionError, "Root.count"):
-            combine_reducers(Root, count=recorder())
+            combine_reducers(Root, count=FunctionReducer(recorder))
         with self.assertRaisesRegex(DefinitionError, "Nested.feature"):
             combine_reducers(Nested, feature=combine_reducers(Count))
 
-    def test_transition_destination_checked_against_field_without_schema(self):
-        class WrongDestination(BaseStateMachine):
-            @transition
-            def add(self, state: Count, action: Add) -> History:
-                return History()
+    def test_function_result_checked_against_field(self):
+        def wrong_destination(state: Count, action: Add) -> History:
+            return History()
 
-        # MachineReducer's generic is a caller declaration, not proof that the
-        # supplied machine has that result type. Composition can catch this from
-        # the real transition and dataclass field annotations.
-        child = MachineReducer[Count](WrongDestination())
-        with self.assertRaisesRegex(DefinitionError, "destination"):
-            combine_reducers(Root, count=child)
+        with self.assertRaisesRegex(DefinitionError, "result"):
+            combine_reducers(Root, count=wrong_destination)
 
-    def test_broad_transition_source_is_compatible_with_specific_field(self):
-        class Broad(BaseStateMachine):
-            @transition
-            def add(self, state: BaseState, action: Add) -> Count:
-                return Count(3)
+    def test_broad_function_input_is_compatible_with_specific_field(self):
+        def broad(state: object, action: Add) -> Count:
+            return Count(3)
 
-        reducer = combine_reducers(Root, count=MachineReducer[Count](Broad()))
+        reducer = combine_reducers(Root, count=broad)
         self.assertEqual(reducer(Root(), Add()).count, Count(3))
 
-    def test_empty_machine_is_an_identity_slice(self):
-        reducer = combine_reducers(Root, count=MachineReducer[Count](BaseStateMachine()))
-        old = Root()
-        self.assertIs(reducer(old, Add()), old)
-
-    def test_union_field_allows_states_without_registered_transitions(self):
+    def test_union_field_allows_explicitly_unchanged_state_variants(self):
         @dataclass(frozen=True)
-        class UnionRoot(BaseState):
+        class UnionRoot:
             part: Count | History = Count()
 
-        reducer = combine_reducers(UnionRoot, part=MachineReducer[Count | History](Counter()))
+        def increment(state: Count | History, action: Add) -> Count | History:
+            return counter(state, action) if isinstance(state, Count) else state
+
+        reducer = combine_reducers(UnionRoot, part=increment)
         self.assertEqual(reducer(UnionRoot(), Add()).part, Count(1))
         old = UnionRoot(History((4,)))
         self.assertIs(reducer(old, Add()), old)
@@ -219,9 +196,9 @@ class CombineTests(unittest.TestCase):
 
     def test_invalid_root_and_async_children_rejected(self):
         with self.assertRaises(DefinitionError):
-            combine_reducers(BaseState, count=counter())
+            combine_reducers(object, count=counter)
         with self.assertRaises(DefinitionError):
-            combine_reducers(Root(), count=counter())
+            combine_reducers(Root(), count=counter)
 
         async def asynchronous(state, action):
             return state
@@ -231,15 +208,15 @@ class CombineTests(unittest.TestCase):
 
     def test_non_init_field_cannot_be_reduced(self):
         @dataclass(frozen=True)
-        class Derived(BaseState):
+        class Derived:
             count: Count = field(default=Count(), init=False)
 
         with self.assertRaisesRegex(DefinitionError, "init=False"):
-            combine_reducers(Derived, count=counter())
+            combine_reducers(Derived, count=counter)
 
     def test_union_fields_and_dataclass_inheritance(self):
         @dataclass(frozen=True)
-        class UnionRoot(BaseState):
+        class UnionRoot:
             part: Count | History = Count()
 
         def switch(state: Count | History, action: Add) -> Count | History:
@@ -253,7 +230,7 @@ class CombineTests(unittest.TestCase):
             extra: str = "child"
 
         root = ChildRoot()
-        result = combine_reducers(ChildRoot, count=counter())(root, Add())
+        result = combine_reducers(ChildRoot, count=counter)(root, Add())
         self.assertEqual(result, ChildRoot(count=Count(1)))
         self.assertIsInstance(result, ChildRoot)
 

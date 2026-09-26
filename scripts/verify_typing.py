@@ -66,7 +66,7 @@ def verify(fixtures: Path, python: Path) -> None:
             settings.update(venvPath=str(venv.parent), venv=venv.name)
         config.write_text(json.dumps(settings))
         commands = {
-            'mypy': [str(tools / 'mypy'), '--strict', '--untyped-calls-exclude=typomata',
+            'mypy': [str(tools / 'mypy'), '--strict',
                      '--python-version', '3.10', '--python-executable', str(python),
                      '--no-incremental', '--no-pretty', '--no-color-output',
                      '--no-error-summary', '--show-error-codes', *names],

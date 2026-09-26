@@ -45,7 +45,7 @@ class Counter:
         return Count(state.value + action.amount)
 
 
-class Logging(Middleware[Count, Actions]):
+class Logging(Middleware[Count, Actions], manual_actions=Add):
     @intercept(catch_exceptions=True)
     def log(self, event: Add, context: MiddlewareContext[Count, Actions]) -> None:
         assert_type(event, Add)
@@ -93,7 +93,7 @@ def check() -> None:
     Logging().log(action=Add(), context=context)  # type: ignore[call-arg]  # pyright: ignore[reportCallIssue]
 
 
-class Automatic(Middleware[Count, Actions]):
+class Automatic(Middleware[Count, Actions], pre_actions=Add, post_actions=Add):
     @intercept_pre(catch_exceptions=True)
     def before(self, action: Add, ctx: StoreAPI[Count, Actions]) -> None:
         assert_type(ctx.get_state(), Count)
@@ -136,7 +136,7 @@ def check_store_contract() -> None:
 
 # Decorator typing must keep subclass dependencies, inheritance, narrow action
 # handlers, and keyword parameter names usable while preserving return types.
-class Audit(Middleware[Count, Actions]):
+class Audit(Middleware[Count, Actions], pre_actions=Add):
     def __init__(self, prefix: str) -> None:
         self.prefix = prefix
 

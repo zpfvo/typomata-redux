@@ -31,14 +31,6 @@ def require(value: object, allowed: tuple[type, ...], context: str) -> None:
         raise TypeError(f"{context}: expected {names}, got {type(value).__qualname__}")
 
 
-def compatible_inputs(
-    declared: tuple[type, ...], allowed: tuple[type, ...], context: str,
-) -> None:
-    for cls in declared:
-        if not any(issubclass(cls, item) or issubclass(item, cls) for item in allowed):
-            raise DefinitionError(f"{context}: {cls.__qualname__} is outside the vocabulary")
-
-
 def synchronous(func: object, context: str) -> None:
     target = func if inspect.isfunction(func) or inspect.ismethod(func) else getattr(func, "__call__", func)
     if not callable(func) or any(check(target) for check in (

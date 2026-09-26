@@ -9,7 +9,7 @@ from typing import Any, Callable, Generic, Literal, TypeVar, cast, get_origin, g
 
 from typing_extensions import ParamSpec, TypeAlias
 
-from ._metadata import InterceptorInfo, Phase
+from ._metadata import InterceptorInfo, Phase, PhaseCoverage
 from ._recovery import Invocation, protect
 from ._validation import classes, require, returns_none, synchronous
 from .errors import AmbiguousHandlerError, CancelAction, DefinitionError, DispatchError, MiddlewareError
@@ -20,6 +20,7 @@ P = ParamSpec("P")
 Dispatch: TypeAlias = Callable[[A], None]
 _Outcome = Literal["returned", "recovered", "cancelled"]
 _logger = logging.getLogger(__name__)
+_UNSET = object()
 
 
 @dataclass(frozen=True)
@@ -233,8 +234,64 @@ def _resolve(owner: type, name: str, decl: _Declaration) -> _Handler:
     )
 
 
+def _phase_coverage(owner: type, phase: Phase, declaration: object) -> PhaseCoverage:
+    if declaration is _UNSET:
+        # Merge direct-base contracts, deduplicating diamonds. An explicit
+        # declaration replaces the inherited vocabulary for this phase.
+        actions = tuple(dict.fromkeys(
+            action
+            for base in owner.__bases__ if issubclass(base, Middleware)
+            for coverage in base._coverage if coverage.phase == phase
+            for action in coverage.actions
+        ))
+    else:
+        actions = () if declaration is None else classes(declaration, f"{owner.__qualname__}.{phase}_actions")
+    return PhaseCoverage(phase, actions)
+
+
+def _validate_coverage(owner: type, coverage: tuple[PhaseCoverage, ...], handlers: list[_Handler]) -> None:
+    for contract in coverage:
+        label = f"{owner.__qualname__}.{contract.phase}_actions"
+        registered = [handler for handler in handlers if handler.info.phase == contract.phase]
+        if registered and not contract.actions:
+            raise DefinitionError(f"{label}: declare an action class or union for this phase's handlers")
+        for handler in registered:
+            for action in handler.info.actions:
+                if not any(issubclass(action, allowed) for allowed in contract.actions):
+                    raise DefinitionError(f"{handler.info.name}: {action.__qualname__} is outside declared {label}")
+        for action in contract.actions:
+            if not any(any(issubclass(action, accepted) for accepted in handler.info.actions)
+                       for handler in registered):
+                raise DefinitionError(f"{owner.__qualname__}: missing {contract.phase} handler for {action.__qualname__}")
+
+    # Check all named types, including narrower handler inputs under a declared
+    # superclass. Future multiple-inheritance subclasses still need dispatch-time
+    # ambiguity checks; this is not a proof about every possible Python class.
+    known_actions = dict.fromkeys(
+        [action for contract in coverage for action in contract.actions]
+        + [action for handler in handlers for action in handler.info.actions]
+    )
+    for action in known_actions:
+        matches = [handler for handler in handlers
+                   if any(issubclass(action, accepted) for accepted in handler.info.actions)]
+        phases = [handler.info.phase for handler in matches]
+        if len(phases) != len(set(phases)) or ("manual" in phases and len(phases) > 1):
+            raise DefinitionError(
+                f"{owner.__qualname__}: conflicting interceptors for {action.__qualname__}: "
+                + ", ".join(handler.info.name for handler in matches)
+            )
+
+
 class Middleware(Generic[S, A]):
     """Action-selected handlers, composed in the store's declared order.
+
+    Declare pre_actions, post_actions, and/or manual_actions as class keywords
+    for every used phase. Each class/union must be fully covered by its phase's
+    handlers, whose annotations must fit that vocabulary. Validation runs at
+    class definition, not in a static type checker. Unused phases may be omitted.
+    Subclasses inherit contracts from their direct bases and are revalidated;
+    an explicit keyword replaces that phase, and None clears it. A cleared phase
+    must have no registered handlers. Constructors remain application-owned.
 
     Consumption stops forwarding, not normal unwinding. For example::
 
@@ -262,8 +319,12 @@ class Middleware(Generic[S, A]):
     """
 
     _handlers: tuple[_Handler, ...] = ()
+    _coverage: tuple[PhaseCoverage, ...] = ()
 
-    def __init_subclass__(cls, **kwargs: Any) -> None:
+    def __init_subclass__(
+        cls, *, pre_actions: object = _UNSET, post_actions: object = _UNSET,
+        manual_actions: object = _UNSET, **kwargs: Any,
+    ) -> None:
         super().__init_subclass__(**kwargs)
         members: dict[str, tuple[type, object]] = {}
         for owner in cls.__mro__:
@@ -290,9 +351,16 @@ class Middleware(Generic[S, A]):
                 previous.append(handler)
             pending.append((decl, owner, handler))
             handlers.append(handler)
+        coverage = (
+            _phase_coverage(cls, "manual", manual_actions),
+            _phase_coverage(cls, "pre", pre_actions),
+            _phase_coverage(cls, "post", post_actions),
+        )
+        _validate_coverage(cls, coverage, handlers)
         for decl, owner, handler in pending:
             decl.definitions[owner] = handler
         cls._handlers = tuple(handlers)
+        cls._coverage = coverage
 
     def __call__(self, api: StoreAPI[S, A], next_dispatch: Dispatch[A]) -> Dispatch[A]:
         def dispatch(action: A) -> None:

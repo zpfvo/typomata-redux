@@ -16,14 +16,12 @@ build-backend = "uv_build"
 dev = ["mypy>=1.15", "pyright>=1.1.400"]
 
 [tool.mypy]
-files = ["src/typomata_redux", "tests/typing", "tests/typing_optional", "examples"]
+files = ["src/typomata_redux", "tests/typing", "examples"]
 python_version = "3.10"
 strict = true
-# Typomata's public __init_subclass__ currently lacks annotations.
-untyped_calls_exclude = ["typomata"]
 
 [tool.pyright]
-include = ["src/typomata_redux", "tests/typing", "tests/typing_optional", "examples"]
+include = ["src/typomata_redux", "tests/typing", "examples"]
 pythonVersion = "3.10"
 typeCheckingMode = "standard"
 venvPath = "."

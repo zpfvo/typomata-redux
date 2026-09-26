@@ -5,55 +5,46 @@ import unittest
 from dataclasses import dataclass
 from typing import Annotated
 
-from typomata import BaseAction, BaseState, BaseStateMachine, transition
 from typomata_redux import (
-    AmbiguousHandlerError, DefinitionError, DispatchError, FunctionReducer, MachineReducer,
+    AmbiguousHandlerError, DefinitionError, DispatchError, FunctionReducer,
     Middleware, MiddlewareContext, Store, intercept,
 )
 
 
 @dataclass(frozen=True)
-class State(BaseState):
+class State:
     value: int = 0
 
 
 @dataclass(frozen=True)
-class Add(BaseAction):
+class Add:
     amount: int = 1
 
 
 @dataclass(frozen=True)
-class Ignore(BaseAction):
+class Ignore:
     pass
 
 
-class Foreign(BaseAction):
+class Foreign:
     pass
 
 
 @dataclass(frozen=True)
-class Finished(BaseState):
+class Finished:
     value: int
-
-
-class Finisher(BaseStateMachine):
-    @transition
-    def finish(self, state: State, action: Add) -> Finished:
-        return Finished(state.value + action.amount)
 
 
 Actions = Add | Ignore
 Context = MiddlewareContext[State, Actions]
 
 
-class Counter(BaseStateMachine):
-    @transition
-    def add(self, state: State, action: Add) -> State:
-        return State(state.value + action.amount)
+def counter(state: State, action: Add) -> State:
+    return State(state.value + action.amount)
 
 
-def adapter(machine=None):
-    return MachineReducer[State](machine or Counter())
+def adapter():
+    return FunctionReducer(counter)
 
 
 def store(*middleware, reducer=None):
@@ -63,7 +54,7 @@ def store(*middleware, reducer=None):
     )
 
 
-class Recording(Middleware[State, Actions]):
+class Recording(Middleware[State, Actions], manual_actions=Actions):
     def __init__(self, name, events):
         self.name, self.events = name, events
 
@@ -97,7 +88,7 @@ class ReduxTests(unittest.TestCase):
     def test_consumption_and_unmatched_forwarding(self):
         events = []
 
-        class Consume(Middleware[State, Actions]):
+        class Consume(Middleware[State, Actions], manual_actions=Add):
             @intercept
             def consume(self, action: Add, ctx: Context) -> None:
                 events.append("consumed")
@@ -113,7 +104,7 @@ class ReduxTests(unittest.TestCase):
     def test_replacement_only_goes_downstream(self):
         seen = []
 
-        class Replace(Middleware[State, Actions]):
+        class Replace(Middleware[State, Actions], manual_actions=Add):
             @intercept
             def handle(self, action: Add, ctx: Context) -> None:
                 seen.append(action.amount)
@@ -127,7 +118,7 @@ class ReduxTests(unittest.TestCase):
     def test_nested_dispatch_restarts_entire_chain(self):
         events = []
 
-        class FollowUp(Middleware[State, Actions]):
+        class FollowUp(Middleware[State, Actions], manual_actions=Add):
             @intercept
             def handle(self, action: Add, ctx: Context) -> None:
                 ctx.next(action)
@@ -152,7 +143,7 @@ class ReduxTests(unittest.TestCase):
         self.assertEqual(events, [])
 
     def test_untyped_unrelated_replacement_is_an_unmatched_noop(self):
-        class Bad(Middleware[State, Actions]):
+        class Bad(Middleware[State, Actions], manual_actions=Add):
             @intercept
             def handle(self, action: Add, ctx: Context) -> None:
                 ctx.next(object())
@@ -164,7 +155,7 @@ class ReduxTests(unittest.TestCase):
         self.assertEqual(subject.get_state(), State())
 
     def test_next_once_and_no_rollback_after_commit(self):
-        class Twice(Middleware[State, Actions]):
+        class Twice(Middleware[State, Actions], manual_actions=Add):
             @intercept
             def handle(self, action: Add, ctx: Context) -> None:
                 ctx.next(action)
@@ -178,7 +169,7 @@ class ReduxTests(unittest.TestCase):
     def test_next_expires_but_dispatch_remains_available(self):
         saved = []
 
-        class Save(Middleware[State, Actions]):
+        class Save(Middleware[State, Actions], manual_actions=Add):
             @intercept
             def handle(self, action: Add, ctx: Context) -> None:
                 saved.append(ctx)
@@ -207,7 +198,7 @@ class ReduxTests(unittest.TestCase):
     def test_bindings_are_per_store(self):
         contexts = []
 
-        class Save(Middleware[State, Actions]):
+        class Save(Middleware[State, Actions], manual_actions=Add):
             @intercept
             def handle(self, action: Add, ctx: Context) -> None:
                 contexts.append(ctx)
@@ -334,23 +325,26 @@ class ReduxTests(unittest.TestCase):
     def test_ambiguous_middleware_invokes_neither(self):
         events = []
 
-        class Overlap(Middleware[State, Actions]):
+        class Overlap(Middleware[State, Actions], manual_actions=Actions):
             @intercept
-            def all(self, action: BaseAction, ctx: Context) -> None:
+            def all(self, action: Ignore, ctx: Context) -> None:
                 events.append("all")
 
             @intercept
             def add(self, action: Add, ctx: Context) -> None:
                 events.append("add")
 
+        class Both(Add, Ignore):
+            pass
+
         subject = store(Overlap())
         with self.assertRaises(AmbiguousHandlerError):
-            subject.dispatch(Add())
+            subject.dispatch(Both())
         self.assertEqual(events, [])
 
     def test_duplicate_union_handlers_fail_at_definition(self):
         with self.assertRaises(DefinitionError):
-            class Duplicate(Middleware[State, Actions]):
+            class Duplicate(Middleware[State, Actions], manual_actions=Actions):
                 @intercept
                 def all(self, action: Actions, ctx: Context) -> None:
                     pass
@@ -361,7 +355,7 @@ class ReduxTests(unittest.TestCase):
 
     def test_action_union_is_static_not_runtime_enforced(self):
         # This call is rejected in the typing fixture, but generic arguments are
-        # not inspected at runtime. An unmatched BaseAction is an ordinary no-op.
+        # not inspected at runtime. An unmatched action is an ordinary no-op.
         subject = store()
         old = subject.get_state()
         subject.dispatch(Foreign())
@@ -370,7 +364,7 @@ class ReduxTests(unittest.TestCase):
     def test_union_annotated_subclass_and_renamed_keyword_parameters(self):
         seen = []
 
-        class AnnotatedHandler(Middleware[State, Actions]):
+        class AnnotatedHandler(Middleware[State, Actions], manual_actions=Annotated[Actions, 'label']):
             @intercept
             def handle(self, event: Annotated[Actions, "label"], context: Context) -> None:
                 seen.append(event)
@@ -391,7 +385,7 @@ class ReduxTests(unittest.TestCase):
     def test_override_super_and_undecorated_removal(self):
         events = []
 
-        class Parent(Middleware[State, Actions]):
+        class Parent(Middleware[State, Actions], manual_actions=Add):
             @intercept
             def handle(self, action: Add, ctx: Context) -> None:
                 events.append("parent")
@@ -407,7 +401,7 @@ class ReduxTests(unittest.TestCase):
         subject.dispatch(Add())
         self.assertEqual(events, ["child", "parent"])
 
-        class Removed(Parent):
+        class Removed(Parent, manual_actions=None):
             def handle(self, action, ctx):
                 raise AssertionError("not registered")
 
@@ -416,7 +410,7 @@ class ReduxTests(unittest.TestCase):
         self.assertEqual(subject.get_state(), State(1))
 
     def test_handler_bad_result(self):
-        class Bad(Middleware[State, Actions]):
+        class Bad(Middleware[State, Actions], manual_actions=Add):
             @intercept
             def handle(self, action: Add, ctx: Context) -> None:
                 return 42
@@ -441,13 +435,13 @@ class ReduxTests(unittest.TestCase):
         ]
         for declaration in declarations:
             with self.subTest(declaration=declaration), self.assertRaises(DefinitionError):
-                exec('class Bad(Middleware[State, Actions]):\n    @intercept\n    ' + declaration, globals())
+                exec('class Bad(Middleware[State, Actions], manual_actions=Add):\n    @intercept\n    ' + declaration, globals())
 
     def test_descriptors_rejected_in_both_decorator_orders(self):
         for descriptor in ('staticmethod', 'classmethod'):
             for decorators in (f'@{descriptor}\n    @intercept', f'@intercept\n    @{descriptor}'):
                 with self.subTest(decorators=decorators), self.assertRaises(DefinitionError):
-                    exec(f'class Bad(Middleware[State, Actions]):\n    {decorators}\n'
+                    exec(f'class Bad(Middleware[State, Actions], manual_actions=Add):\n    {decorators}\n'
                          '    def handle(self, action: Add, ctx: Context) -> None: pass', globals())
 
     def test_async_plain_functions_rejected(self):
@@ -467,64 +461,41 @@ class ReduxTests(unittest.TestCase):
         with self.assertRaises(DefinitionError):
             store(lambda api, next_dispatch: handler)
 
-    def test_typomata_errors_not_converted_to_noop(self):
+    def test_bound_reducer_errors_not_converted_to_noop(self):
         failure = ValueError("domain")
 
-        class Fails(BaseStateMachine):
-            @transition
+        class Fails:
             def handle(self, state: State, action: Add) -> State:
                 raise failure
 
-        subject = store(reducer=adapter(Fails()))
+        subject = store(reducer=FunctionReducer(Fails().handle))
         with self.assertRaises(ValueError) as caught:
             subject.dispatch(Add())
         self.assertIs(caught.exception, failure)
 
-        class BadResult(BaseStateMachine):
-            @transition
+        class BadResult:
             def handle(self, state: State, action: Add) -> State:
                 return 123
 
-        subject = store(reducer=adapter(BadResult()))
-        with self.assertRaises(ValueError):
+        subject = store(reducer=FunctionReducer(BadResult().handle))
+        with self.assertRaises(TypeError):
             subject.dispatch(Add())
         self.assertEqual(subject.get_state(), State())
 
-    def test_ambiguous_reducer_no_invocation(self):
-        events = []
-
-        class Overlap(BaseStateMachine):
-            @transition
-            def broad(self, state: BaseState, action: BaseAction) -> State:
-                events.append("broad")
-                return State()
-
-            @transition
-            def narrow(self, state: State, action: Add) -> State:
-                events.append("narrow")
-                return State()
-
-        subject = store(reducer=adapter(Overlap()))
-        with self.assertRaises(AmbiguousHandlerError):
-            subject.dispatch(Add())
-        self.assertEqual(events, [])
-
     def test_removed_schema_arguments(self):
-        with self.assertRaises(TypeError):
-            MachineReducer[State](Counter(), states=State)
-        with self.assertRaises(TypeError):
-            MachineReducer[State](Counter(), actions=Actions)
         with self.assertRaises(TypeError):
             Store(initial_state=State(), reducer=adapter(), states=State)
         with self.assertRaises(TypeError):
             Store(initial_state=State(), reducer=adapter(), actions=Actions)
 
     def test_state_category_transition_and_unhandled_pair(self):
-        reducer = MachineReducer[State | Finished](
-            Finisher(),
-        )
+        def finish(state: State | Finished, action: Add) -> State | Finished:
+            if isinstance(state, State):
+                return Finished(state.value + action.amount)
+            return state
+
         subject = Store[State | Finished, Actions](
-            initial_state=State(), reducer=reducer,
+            initial_state=State(), reducer=FunctionReducer(finish),
         )
         subject.dispatch(Add(3))
         old = subject.get_state()
@@ -532,8 +503,11 @@ class ReduxTests(unittest.TestCase):
         subject.dispatch(Add(8))
         self.assertIs(subject.get_state(), old)
 
-    def test_state_variant_without_any_transition_is_a_noop(self):
-        reducer = MachineReducer[State | Finished](Counter())
+    def test_reducer_can_explicitly_preserve_a_terminal_state(self):
+        def increment(state: State | Finished, action: Add) -> State | Finished:
+            return counter(state, action) if isinstance(state, State) else state
+
+        reducer = FunctionReducer(increment)
         old = Finished(4)
         self.assertIs(reducer(old, Add()), old)
         self.assertIs(reducer(old, Foreign()), old)
@@ -542,7 +516,7 @@ class ReduxTests(unittest.TestCase):
         saved = []
         failure = ValueError("effect failed")
 
-        class Fails(Middleware[State, Actions]):
+        class Fails(Middleware[State, Actions], manual_actions=Add):
             @intercept
             def handle(self, action: Add, ctx: Context) -> None:
                 saved.append(ctx)

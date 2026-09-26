@@ -18,12 +18,13 @@ class ErrorTests(unittest.TestCase):
             failure = ValueError('effect failed')
             seen = []
 
-            class Outer(Middleware[State, Actions]):
+            class Outer(Middleware[State, Actions], post_actions=Add):
                 @intercept_post
                 def after(self, action: Add, ctx: API) -> None:
                     seen.append(ctx.get_state().value)
 
-            class Fail(Middleware[State, Actions]):
+            contracts = {"pre_actions" if decorator is intercept_pre else "post_actions": Add}
+            class Fail(Middleware[State, Actions], **contracts):
                 @decorator(catch_exceptions=True)
                 def effect(self, action: Add, ctx: API) -> None:
                     raise failure
@@ -38,7 +39,7 @@ class ErrorTests(unittest.TestCase):
 
     def test_manual_recovery_forwards_exactly_once(self):
         for forward_first in (False, True):
-            class Fail(Middleware[State, Actions]):
+            class Fail(Middleware[State, Actions], manual_actions=Add):
                 @intercept(catch_exceptions=True)
                 def effect(self, action: Add, ctx: Context) -> None:
                     if forward_first:
@@ -54,7 +55,7 @@ class ErrorTests(unittest.TestCase):
             self.assertEqual(notifications, [True])
 
     def test_successful_consumption_is_not_recovered(self):
-        class Consume(Middleware[State, Actions]):
+        class Consume(Middleware[State, Actions], manual_actions=Add):
             @intercept(catch_exceptions=True)
             def effect(self, action: Add, ctx: Context) -> None:
                 pass
@@ -68,12 +69,12 @@ class ErrorTests(unittest.TestCase):
         for catch in (False, True):
             seen = []
 
-            class Outer(Middleware[State, Actions]):
+            class Outer(Middleware[State, Actions], post_actions=Add):
                 @intercept_post
                 def after(self, action: Add, ctx: API) -> None:
                     seen.append('outer')
 
-            class Cancel(Middleware[State, Actions]):
+            class Cancel(Middleware[State, Actions], pre_actions=Add, post_actions=Add):
                 @intercept_pre(catch_exceptions=catch)
                 def before(self, action: Add, ctx: API) -> None:
                     raise CancelAction()
@@ -90,7 +91,7 @@ class ErrorTests(unittest.TestCase):
 
     def test_manual_cancel_before_and_after_next(self):
         for forward_first in (False, True):
-            class Cancel(Middleware[State, Actions]):
+            class Cancel(Middleware[State, Actions], manual_actions=Add):
                 @intercept(catch_exceptions=True)
                 def effect(self, action: Add, ctx: Context) -> None:
                     if forward_first:
@@ -103,7 +104,7 @@ class ErrorTests(unittest.TestCase):
 
     def test_fatal_and_base_exceptions_propagate(self):
         for failure in (MiddlewareError('fatal'), KeyboardInterrupt(), SystemExit()):
-            class Fail(Middleware[State, Actions]):
+            class Fail(Middleware[State, Actions], pre_actions=Add):
                 @intercept_pre(catch_exceptions=True)
                 def before(self, action: Add, ctx: API) -> None:
                     raise failure
@@ -119,7 +120,7 @@ class ErrorTests(unittest.TestCase):
             for failure in (ValueError('downstream'), CancelAction()):
                 calls = []
 
-                class Forward(Middleware[State, Actions]):
+                class Forward(Middleware[State, Actions], manual_actions=Add):
                     @intercept(catch_exceptions=True)
                     def effect(self, action: Add, ctx: Context) -> None:
                         ctx.next(action)
@@ -142,7 +143,8 @@ class ErrorTests(unittest.TestCase):
             for translate in (None, ValueError('translated'), CancelAction()):
                 original = ValueError('nested')
 
-                class Fail(Middleware[State, Actions]):
+                contracts = {"pre_actions" if decorator is intercept_pre else "post_actions": Add}
+                class Fail(Middleware[State, Actions], **contracts):
                     @decorator(catch_exceptions=True)
                     def effect(self, action: Add, ctx: API) -> None:
                         try:
@@ -165,7 +167,7 @@ class ErrorTests(unittest.TestCase):
                 self.assertEqual(subject.get_state(), State(int(decorator is intercept_post)))
 
     def test_recovery_does_not_hide_contract_errors(self):
-        class Twice(Middleware[State, Actions]):
+        class Twice(Middleware[State, Actions], manual_actions=Add):
             @intercept(catch_exceptions=True)
             def effect(self, action: Add, ctx: Context) -> None:
                 ctx.next(action)
@@ -174,7 +176,7 @@ class ErrorTests(unittest.TestCase):
         with self.assertNoLogs(LOGGER), self.assertRaises(DispatchError):
             store(Twice()).dispatch(Add())
 
-        class BadReturn(Middleware[State, Actions]):
+        class BadReturn(Middleware[State, Actions], pre_actions=Add):
             @intercept_pre(catch_exceptions=True)
             def effect(self, action: Add, ctx: API) -> None:
                 return 1
@@ -183,7 +185,7 @@ class ErrorTests(unittest.TestCase):
             store(BadReturn()).dispatch(Add())
 
     def test_direct_calls_and_explicit_false_do_not_recover(self):
-        class Fail(Middleware[State, Actions]):
+        class Fail(Middleware[State, Actions], pre_actions=Add, post_actions=Add):
             @intercept_pre(catch_exceptions=True)
             def before(self, action: Add, ctx: API) -> None:
                 raise ValueError('direct')
@@ -224,7 +226,7 @@ class ErrorTests(unittest.TestCase):
 
                         trigger = effect_middleware(decorator, effect)
 
-                        class Fail(Middleware[State, Actions]):
+                        class Fail(Middleware[State, Actions], pre_actions=Ignore):
                             @intercept_pre
                             def before(self, action: Ignore, ctx: API) -> None:
                                 if failure_source == 'middleware':
@@ -310,7 +312,7 @@ class ErrorTests(unittest.TestCase):
         nested_failure = ValueError('nested')
         outer_failure = ValueError('outer effect')
 
-        class Handle(Middleware[State, Actions]):
+        class Handle(Middleware[State, Actions], pre_actions=Add):
             @intercept_pre(catch_exceptions=True)
             def before(self, action: Add, ctx: API) -> None:
                 if action.amount == 1:
@@ -385,14 +387,15 @@ class ErrorTests(unittest.TestCase):
 def effect_middleware(decorator, effect):
     """Run the same effect with the context appropriate to each handler phase."""
     if decorator is intercept:
-        class Manual(Middleware[State, Actions]):
+        class Manual(Middleware[State, Actions], manual_actions=Add):
             @intercept(catch_exceptions=True)
             def handle(self, action: Add, ctx: Context) -> None:
                 effect(action, ctx)
                 ctx.next(action)
         return Manual()
 
-    class Automatic(Middleware[State, Actions]):
+    contracts = {"pre_actions" if decorator is intercept_pre else "post_actions": Add}
+    class Automatic(Middleware[State, Actions], **contracts):
         @decorator(catch_exceptions=True)
         def handle(self, action: Add, ctx: API) -> None:
             effect(action, ctx)

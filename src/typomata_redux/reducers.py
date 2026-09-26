@@ -2,20 +2,14 @@ from __future__ import annotations
 
 from dataclasses import dataclass, fields, is_dataclass, replace
 from inspect import Parameter, isfunction, ismethod, signature
-from typing import Any, Callable, Generic, Iterable, Mapping, Protocol, TypeVar, cast, get_type_hints
+from typing import Any, Callable, Generic, TypeVar, cast, get_type_hints
 
 from ._metadata import TransitionInfo
-from ._validation import classes, compatible_inputs, require, synchronous, synchronous_result
-from .errors import AmbiguousHandlerError, DefinitionError
+from ._validation import classes, require, synchronous, synchronous_result
+from .errors import DefinitionError
 
 S = TypeVar("S")
 A = TypeVar("A")
-
-
-class _TransitionMachine(Protocol):
-    """The public Typomata snapshot interface; importing Typomata is unnecessary."""
-
-    def transition_map(self) -> Iterable[Mapping[str, Any]]: ...
 
 
 class FunctionReducer(Generic[S]):
@@ -77,54 +71,6 @@ class FunctionReducer(Generic[S]):
 
 
 @dataclass(frozen=True)
-class _Case:
-    info: TransitionInfo
-    invoke: Callable[[object, object, object], object]
-
-
-class MachineReducer(Generic[S]):
-    """Adapt a Typomata machine; unrelated actions preserve state identity.
-
-    S supplies the static state contract. Runtime validation comes from transition
-    annotations, not a second state/action schema or generic introspection.
-    """
-
-    def __init__(self, machine: _TransitionMachine) -> None:
-        self._machine = machine
-        self._cases = tuple(
-            _Case(
-                TransitionInfo(
-                    name=str(record["name"]), sources=tuple(record["sources"]),
-                    actions=tuple(record["actions"]), destinations=tuple(record["destinations"]),
-                ),
-                record["func"],
-            )
-            for record in machine.transition_map()
-        )
-
-    def _validate_field(self, allowed: tuple[type, ...], context: str) -> None:
-        # Composition can check existing declarations against a dataclass field
-        # without requiring another user-supplied state schema.
-        for case in self._cases:
-            compatible_inputs(case.info.sources, allowed, context)
-            if not all(any(issubclass(dest, state) for state in allowed) for dest in case.info.destinations):
-                raise DefinitionError(f"{context}: transition destination is outside the field state types")
-
-    def __call__(self, state: S, action: object) -> S:
-        matches = [case for case in self._cases
-                   if isinstance(state, case.info.sources) and isinstance(action, case.info.actions)]
-        if not matches:
-            return state
-        if len(matches) > 1:
-            raise AmbiguousHandlerError(
-                "Ambiguous reducer handlers: " + ", ".join(case.info.name for case in matches)
-            )
-        # Invoke the public decorated method: Typomata still owns result validation.
-        result = matches[0].invoke(self._machine, state, action)
-        return cast(S, result)
-
-
-@dataclass(frozen=True)
 class _FieldReducer:
     name: str
     states: tuple[type, ...]
@@ -165,9 +111,9 @@ class CombinedReducer(Generic[S]):
                 raise DefinitionError(f"{context}: cannot reduce a field with init=False")
             allowed = classes(hints.get(name), context)
             synchronous(reducer, context)
-            if not isinstance(reducer, (FunctionReducer, MachineReducer, CombinedReducer)):
+            if not isinstance(reducer, (FunctionReducer, CombinedReducer)):
                 reducer = FunctionReducer(reducer)
-            if isinstance(reducer, (FunctionReducer, MachineReducer)):
+            if isinstance(reducer, FunctionReducer):
                 reducer._validate_field(allowed, context)
             elif isinstance(reducer, CombinedReducer):
                 child_state = reducer._state_type

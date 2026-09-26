@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import unittest
 
-from typomata import BaseAction
 from typomata_redux import (
     AmbiguousHandlerError, DefinitionError, Middleware, StoreAPI,
     intercept, intercept_pre, intercept_post,
@@ -16,7 +15,7 @@ class PhaseTests(unittest.TestCase):
     def test_order_state_and_context_capabilities(self):
         events = []
 
-        class Phases(Middleware[State, Actions]):
+        class Phases(Middleware[State, Actions], pre_actions=Actions, post_actions=Actions):
             def __init__(self, name):
                 self.name = name
 
@@ -44,7 +43,8 @@ class PhaseTests(unittest.TestCase):
         for decorator in (intercept_pre, intercept_post):
             seen = []
 
-            class Only(Middleware[State, Actions]):
+            contracts = {"pre_actions" if decorator is intercept_pre else "post_actions": Add}
+            class Only(Middleware[State, Actions], **contracts):
                 @decorator
                 def handle(self, action: Add, ctx: API) -> None:
                     seen.append(ctx.get_state().value)
@@ -59,12 +59,12 @@ class PhaseTests(unittest.TestCase):
     def test_post_runs_after_consumption_with_original_action(self):
         seen = []
 
-        class Post(Middleware[State, Actions]):
+        class Post(Middleware[State, Actions], post_actions=Add):
             @intercept_post
             def after(self, action: Add, ctx: API) -> None:
                 seen.append((action, ctx.get_state()))
 
-        class Consume(Middleware[State, Actions]):
+        class Consume(Middleware[State, Actions], manual_actions=Add):
             @intercept
             def handle(self, action: Add, ctx: Context) -> None:
                 pass
@@ -77,12 +77,12 @@ class PhaseTests(unittest.TestCase):
     def test_post_receives_original_action_after_replacement(self):
         seen = []
 
-        class Post(Middleware[State, Actions]):
+        class Post(Middleware[State, Actions], post_actions=Add):
             @intercept_post
             def after(self, action: Add, ctx: API) -> None:
                 seen.append(action.amount)
 
-        class Replace(Middleware[State, Actions]):
+        class Replace(Middleware[State, Actions], manual_actions=Add):
             @intercept
             def handle(self, action: Add, ctx: Context) -> None:
                 ctx.next(Add(9))
@@ -96,7 +96,7 @@ class PhaseTests(unittest.TestCase):
         failure = ValueError('pre failed')
         seen = []
 
-        class Fail(Middleware[State, Actions]):
+        class Fail(Middleware[State, Actions], pre_actions=Add, post_actions=Add):
             @intercept_pre
             def before(self, action: Add, ctx: API) -> None:
                 raise failure
@@ -117,7 +117,7 @@ class PhaseTests(unittest.TestCase):
             seen = []
             failure = ValueError('downstream')
 
-            class Post(Middleware[State, Actions]):
+            class Post(Middleware[State, Actions], post_actions=Add):
                 @intercept_post
                 def after(self, action: Add, ctx: API) -> None:
                     seen.append(True)
@@ -135,7 +135,7 @@ class PhaseTests(unittest.TestCase):
             self.assertEqual(subject.get_state(), State(1 if failing_listener else 0))
 
     def test_post_failure_does_not_roll_back(self):
-        class Fail(Middleware[State, Actions]):
+        class Fail(Middleware[State, Actions], post_actions=Add):
             @intercept_post
             def after(self, action: Add, ctx: API) -> None:
                 raise ValueError('post')
@@ -148,7 +148,7 @@ class PhaseTests(unittest.TestCase):
     def test_post_can_dispatch_through_whole_chain(self):
         seen = []
 
-        class Phases(Middleware[State, Actions]):
+        class Phases(Middleware[State, Actions], pre_actions=Actions, post_actions=Add):
             @intercept_pre
             def before(self, action: Actions, ctx: API) -> None:
                 seen.append(type(action))
@@ -169,7 +169,11 @@ class PhaseTests(unittest.TestCase):
                 namespace = dict(globals(), first=first, second=second)
                 one = 'Context' if first is intercept else 'API'
                 two = 'Context' if second is intercept else 'API'
-                exec(f'''class Bad(Middleware[State, Actions]):
+                keywords = {intercept: 'manual_actions', intercept_pre: 'pre_actions',
+                            intercept_post: 'post_actions'}
+                contracts = {keywords[phase]: Add for phase in (first, second)}
+                namespace['contracts'] = contracts
+                exec(f'''class Bad(Middleware[State, Actions], **contracts):
     @first
     def one(self, action: Add, ctx: {one}) -> None: pass
     @second
@@ -179,9 +183,12 @@ class PhaseTests(unittest.TestCase):
     def test_runtime_overlap_fails_before_any_effect(self):
         seen = []
 
-        class Overlap(Middleware[State, Actions]):
+        class Both(Add, Ignore):
+            pass
+
+        class Overlap(Middleware[State, Actions], pre_actions=Ignore, manual_actions=Add):
             @intercept_pre
-            def before(self, action: BaseAction, ctx: API) -> None:
+            def before(self, action: Ignore, ctx: API) -> None:
                 seen.append('pre')
 
             @intercept
@@ -189,16 +196,16 @@ class PhaseTests(unittest.TestCase):
                 seen.append('manual')
 
         with self.assertRaises(AmbiguousHandlerError):
-            store(Overlap()).dispatch(Add())
+            store(Overlap()).dispatch(Both())
         self.assertEqual(seen, [])
 
-        class PostOverlap(Middleware[State, Actions]):
+        class PostOverlap(Middleware[State, Actions], pre_actions=Add, post_actions=Actions):
             @intercept_pre
             def before(self, action: Add, ctx: API) -> None:
                 seen.append('pre')
 
             @intercept_post
-            def broad(self, action: BaseAction, ctx: API) -> None:
+            def broad(self, action: Ignore, ctx: API) -> None:
                 pass
 
             @intercept_post
@@ -206,18 +213,20 @@ class PhaseTests(unittest.TestCase):
                 pass
 
         with self.assertRaises(AmbiguousHandlerError):
-            store(PostOverlap()).dispatch(Add())
+            store(PostOverlap()).dispatch(Both())
         self.assertEqual(seen, [])
 
     def test_wrong_context_stacked_decorators_and_bad_results(self):
         for decorator in (intercept_pre, intercept_post):
             with self.assertRaises(DefinitionError):
-                class Wrong(Middleware[State, Actions]):
+                contracts = {"pre_actions" if decorator is intercept_pre else "post_actions": Add}
+                class Wrong(Middleware[State, Actions], **contracts):
                     @decorator
                     def handle(self, action: Add, ctx: Context) -> None:
                         pass
 
-            class BadResult(Middleware[State, Actions]):
+            contracts = {"pre_actions" if decorator is intercept_pre else "post_actions": Add}
+            class BadResult(Middleware[State, Actions], **contracts):
                 @decorator
                 def handle(self, action: Add, ctx: API) -> None:
                     return 123
@@ -226,7 +235,7 @@ class PhaseTests(unittest.TestCase):
                 store(BadResult()).dispatch(Add())
 
         with self.assertRaises(DefinitionError):
-            class Stacked(Middleware[State, Actions]):
+            class Stacked(Middleware[State, Actions], pre_actions=Add, post_actions=Add):
                 @intercept_pre
                 @intercept_post
                 def handle(self, action: Add, ctx: API) -> None:
@@ -235,7 +244,7 @@ class PhaseTests(unittest.TestCase):
     def test_inherited_phase_super_and_direct_calls(self):
         seen = []
 
-        class Parent(Middleware[State, Actions]):
+        class Parent(Middleware[State, Actions], pre_actions=Add):
             @intercept_pre
             def before(self, action: Add, ctx: API) -> None:
                 seen.append('parent')

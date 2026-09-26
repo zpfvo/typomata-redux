@@ -4,12 +4,12 @@ Synchronous, typed Redux with annotation-based reducers and middleware. Write
 ordinary reducer functions, compose them over nested state, and keep side effects
 in middleware. State and action types need no marker base classes.
 
-[Typomata](../typomata) state machines remain an optional integration. The core
-package runs without Typomata installed. The project name is still provisional.
+The project name is still provisional.
 
-- [Setup](#setup) and [quick start](#quick-start)
-- [Combining reducers](#combining-reducers) and [optional Typomata integration](#optional-typomata-integration)
+- [Setup](#setup), [quick start](#quick-start), and [exhaustive action handling](#exhaustive-action-handling)
+- [Combining reducers](#combining-reducers) and [calling domain logic](#calling-domain-logic-from-reducers)
 - [Choosing middleware](#choosing-a-middleware-decorator) and [passing dependencies](#passing-dependencies-to-middleware)
+- [Required middleware coverage](#required-middleware-coverage)
 - [Exception handling](#middleware-exception-handling), [subscriptions](#subscriptions), and [async work](#async-work)
 - [API reference](#api-reference), [typing limits](#static-typing-boundaries), and [development](#development)
 
@@ -38,7 +38,7 @@ shorten this sequence; the sections below explain how post-handlers unwind.
 
 ## Setup
 
-Requires Python 3.10+. Install the core from this checkout:
+Requires Python 3.10+. Install from this checkout:
 
 ```bash
 python -m pip install .
@@ -50,9 +50,6 @@ Or use uv without the development dependencies:
 uv sync --no-dev
 uv run --no-dev python examples/counter.py
 ```
-
-Neither command installs Typomata. The [development setup](#development) installs the reviewed Typomata checkout
-separately to test the optional integration.
 
 ## Quick start
 
@@ -85,7 +82,7 @@ def counter(state: Count, action: CounterAction) -> Count:
         return Count()
     assert_never(action)
 
-class Log(Middleware[Count, CounterAction]):
+class Log(Middleware[Count, CounterAction], manual_actions=CounterAction):
     @intercept
     def log(self, action: CounterAction, ctx: MiddlewareContext[Count, CounterAction]) -> None:
         print("before", ctx.get_state())
@@ -102,12 +99,58 @@ assert store.get_state() == Count(2)
 `Store[S, A]` exposes `get_state() -> S` and `dispatch(action: A) -> None`.
 `ctx.next(action)` forwards downstream. Returning without calling it consumes the
 action, then earlier middleware resumes normally.
+`manual_actions=CounterAction` declares the actions this middleware must handle.
+Every used handler phase requires a [coverage declaration](#required-middleware-coverage).
 
 A plain root reducer is called directly for every dispatched action and must
 accept the store's action vocabulary. Use `FunctionReducer(counter)` if you want
 annotation-based filtering and result validation for a standalone reducer too.
 The [runnable example](examples/counter.py) composes two slices and dispatches a
 follow-up action from middleware.
+
+### Exhaustive action handling
+
+A narrow action union makes it possible to catch forgotten cases when the code
+changes. In the quick start, each `isinstance` branch handles one member of
+`CounterAction` and returns. At the final `assert_never(action)`, mypy and Pyright
+can therefore prove that no possible action remains. `assert_never` accepts only
+the `Never` type, which has no possible values.
+
+Suppose you add an action and extend the quick start's union:
+
+```python
+@dataclass(frozen=True)
+class Decrement:
+    amount: int
+
+CounterAction = Add | Reset | Decrement
+```
+
+With `counter` otherwise unchanged, `action` can still be a `Decrement` at
+`assert_never(action)`. Running either type checker now reports an error there:
+`Decrement` cannot be passed where `Never` is expected. Add its branch before
+`assert_never` to make the reducer exhaustive again:
+
+```python
+if isinstance(action, Decrement):
+    return Count(state.value - action.amount)
+```
+
+Keep the final `assert_never` so future additions receive the same check. A branch
+may explicitly return `state` when an action should do nothing. A catch-all
+`return state` would silently accept forgotten cases and lose this check.
+
+This works with independent slices: `combine_reducers` and `FunctionReducer`
+filter out unrelated actions before calling the function, preserving state
+identity. Each reducer can exhaustively handle its own narrow union without
+listing the entire application's actions. Adding an action to the application
+union alone does not require every slice to handle it; extending a slice's union
+does.
+
+Exhaustiveness is checked when you run a type checker; a union annotation alone
+does not require exhaustive branches. If execution reaches `assert_never`, it
+raises an `AssertionError`. The check covers the members of the declared union;
+it does not prove that every application action has a registered reducer.
 
 ## Combining reducers
 
@@ -173,8 +216,8 @@ inputs and function results. These checks are shallow and do not prove purity or
 deep immutability. Exceptions from matching functions propagate, never become
 no-ops, and prevent the root state from being committed.
 
-Existing `FunctionReducer`, `MachineReducer`, and `CombinedReducer` instances can
-also be passed as children. For explicit root typing use
+Existing `FunctionReducer` and `CombinedReducer` instances can also be passed as
+children. For explicit root typing use
 `CombinedReducer[AppState](AppState, count=counter)`. The helper infers that type
 from `AppState`. Adapted and combined reducers accept `object`; the store retains
 its own precise action union.
@@ -184,47 +227,46 @@ Fields with `init=False` cannot be targeted and may be recomputed. Required `Ini
 arguments need a custom root reducer. In-place mutation and side effects cannot
 be rolled back; keep reducers pure.
 
-## Optional Typomata integration
+## Calling domain logic from reducers
 
-Use a Typomata machine when routing by both state type and action type helps your
-domain. It can coexist with function reducers in the same composition:
+Reducers can call pure helper functions, bound methods, or an application-owned
+state machine. Their ordinary state/action/result annotations remain the library's
+interface. For example, building on the quick start and composition examples:
 
 ```python
-from dataclasses import dataclass
-from typomata import BaseAction, BaseState, BaseStateMachine, transition
-from typomata_redux import MachineReducer, Store
+from typomata_redux import combine_reducers
 
-@dataclass(frozen=True)
-class MachineCount(BaseState):
-    value: int = 0
+class CounterLogic:
+    def add(self, state: Count, action: Add) -> Count:
+        return Count(state.value + action.amount)
 
-@dataclass(frozen=True)
-class Increase(BaseAction):
-    amount: int
+logic = CounterLogic()
 
-class CountMachine(BaseStateMachine):
-    @transition
-    def increase(self, state: MachineCount, action: Increase) -> MachineCount:
-        return MachineCount(state.value + action.amount)
+def counter_with_logic(state: Count, action: CounterAction) -> Count:
+    if isinstance(action, Add):
+        return logic.add(state, action)
+    if isinstance(action, Reset):
+        return Count()
+    assert_never(action)
 
-machine_store = Store[MachineCount, Increase](
-    initial_state=MachineCount(),
-    reducer=MachineReducer[MachineCount](CountMachine()),
-)
-machine_store.dispatch(Increase(2))
-assert machine_store.get_state() == MachineCount(2)
+reducer = combine_reducers(AppState, count=counter_with_logic)
 ```
 
-Typomata itself requires its base classes on the machine's states and actions;
-ordinary Redux functions and middleware do not. `MachineReducer` uses the public
-`transition_map()` interface and invokes the decorated transition methods. An
-unmatched state/action pair preserves state identity. Multiple matching transitions
-raise `AmbiguousHandlerError`.
+The wrapper preserves exhaustive action handling and lets composition filter
+unrelated actions. Pure bound methods can also be passed directly as slice reducers
+when their annotated signatures fit the field.
 
-The integration is tested against the reviewed sibling Typomata checkout at commit
-`53bf9aa2ef2d59574217c13477df8e46c2914ec1`. Compatibility with other published builds
-has not been established. Install that reviewed build when using machines; it is
-not a core package dependency. See [the integration example](examples/typomata_counter.py).
+If using a state-machine library, the application installs and configures it, then
+calls it from a reducer using the same pattern. Store the machine's current state
+value in Redux state; keep its behavior object outside that state. Transitions must
+be pure and return state values without mutating existing snapshots. The reducer
+must accept every state variant declared for its slice and decide when a state/action
+pair should be a no-op. Engine errors propagate unless the application handles them
+explicitly. If an engine returns a broad state type, validate and narrow its result
+before returning it from a reducer with a more specific annotation.
+
+Inspection describes the reducer's own declarations. It does not inspect the
+internal transitions of helpers or external state machines.
 
 ## Choosing a middleware decorator
 
@@ -245,7 +287,7 @@ receive `next(action)`. Both dispatch methods return `None`:
 To compare state before and after downstream handling:
 
 ```python
-class ObserveCount(Middleware[Count, Add]):
+class ObserveCount(Middleware[Count, Add], manual_actions=Add):
     @intercept
     def observe(self, action: Add, ctx: MiddlewareContext[Count, Add]) -> None:
         previous = ctx.get_state()
@@ -260,6 +302,86 @@ includes any changes from downstream nested dispatches; it does not isolate one
 reducer invocation. A failed `next` skips the statements after it unless your code
 explicitly handles the exception.
 
+## Required middleware coverage
+
+Every annotated middleware class must declare the actions each used phase handles:
+
+| Handler decorator | Required class keyword |
+| --- | --- |
+| `@intercept_pre` | `pre_actions=...` |
+| `@intercept_post` | `post_actions=...` |
+| `@intercept` | `manual_actions=...` |
+
+Use an action class or a union; `Annotated` wrappers are also supported. Omit unused
+phases. Action classes can live in `counter/actions.py`, while the phase unions live
+alongside the middleware in `counter/middleware.py`. Building on the quick start:
+
+```python
+from typomata_redux import StoreAPI, intercept_pre, intercept_post
+
+CounterPreAction = Add | Reset
+CounterPostAction = Add
+CounterAPI = StoreAPI[Count, CounterAction]
+
+class CounterEffects(
+    Middleware[Count, CounterAction],
+    pre_actions=CounterPreAction,
+    post_actions=CounterPostAction,
+):
+    @intercept_pre
+    def before_add(self, action: Add, ctx: CounterAPI) -> None:
+        print("adding", action.amount)
+
+    @intercept_pre
+    def before_reset(self, action: Reset, ctx: CounterAPI) -> None:
+        print("resetting")
+
+    @intercept_post
+    def after_add(self, action: Add, ctx: CounterAPI) -> None:
+        print("count", ctx.get_state().value)
+
+effects = CounterEffects()  # No action declarations in the constructor.
+```
+
+When Python defines the class, usually during import, the library checks that
+every declared action has a matching handler in that phase and every handler's
+action annotation fits the phase's declaration. For example, adding `Decrement`
+to `CounterPreAction` without adding a pre-handler raises:
+
+```text
+DefinitionError: CounterEffects: missing pre handler for Decrement
+```
+
+Adding a handler for an undeclared action also fails. A declaration with no handlers
+fails even if that entire phase was forgotten. The unions must be maintained
+independently of the handlers so the check can detect omissions. Adding an action
+only to the application's overall union does not require every middleware to handle
+it. Unrelated actions continue downstream. Constructor dependencies are unchanged.
+
+One handler may cover several union members, and subclasses match superclass
+annotations. A handler accepting `object` needs `object` in the phase declaration;
+it covers all actions. A broad declaration cannot be covered solely by handlers
+for some of its subclasses. Known overlaps within a phase, and between manual and
+automatic handlers, fail at class definition. Runtime ambiguity checks remain for
+other overlaps, such as a later class inheriting two separately handled action types.
+
+**Coverage is checked by the library at class definition.** Mypy and Pyright do not
+prove coverage across separate decorated methods. For a handler that accepts a
+union, you can additionally use [the `assert_never` pattern](#exhaustive-action-handling)
+to statically check its internal branches. For example, a pre-handler can return
+after each `isinstance` branch and end with `assert_never(action)`. Declaring coverage
+does not inspect method bodies or guarantee that a handler will execute: earlier
+middleware can consume an action, and errors can prevent later phases.
+
+Subclasses inherit the phase declarations and handlers from their direct bases.
+Multiple bases contribute the union of their requirements. Each subclass is checked
+again after method overrides are resolved. To add or change handled actions, provide
+a replacement declaration for that phase. To remove a phase, use e.g.
+`pre_actions=None` and remove its registered handlers with undecorated overrides.
+Clearing the declaration alone leaves those handlers invalid. Empty middleware
+classes need no declarations. Plain middleware factories use their own routing and
+are outside this coverage contract.
+
 ## Automatic pre/post handlers
 
 Use `@intercept_pre` and `@intercept_post` when forwarding should be automatic:
@@ -267,7 +389,7 @@ Use `@intercept_pre` and `@intercept_post` when forwarding should be automatic:
 ```python
 from typomata_redux import StoreAPI, intercept_pre, intercept_post
 
-class Log(Middleware[Count, Add]):
+class Log(Middleware[Count, Add], pre_actions=Add, post_actions=Add):
     @intercept_pre
     def before(self, action: Add, ctx: StoreAPI[Count, Add]) -> None:
         print("before", ctx.get_state())
@@ -295,7 +417,7 @@ These hooks are not `finally` handlers.
 Keep `@intercept` with `MiddlewareContext` when you need manual forwarding,
 replacement, or consumption. A matching manual handler cannot coexist with a
 matching pre/post handler in the same middleware. Duplicates within a phase also
-conflict. Exact action conflicts fail during class creation; broader overlapping
+conflict. Known action conflicts fail during class creation; other overlapping
 matches fail at dispatch **before any of that middleware's handlers run**.
 Use one decorator per method. Direct calls validate and invoke only that method;
 automatic forwarding belongs to the middleware chain, not the decorator wrapper.
@@ -312,7 +434,7 @@ Building on the counter example above, this middleware accepts a SQLite connecti
 import sqlite3
 from typomata_redux import StoreAPI, intercept_post
 
-class SaveCount(Middleware[Count, Add]):
+class SaveCount(Middleware[Count, Add], post_actions=Add):
     def __init__(self, database: sqlite3.Connection) -> None:
         self.database = database
 
@@ -356,7 +478,7 @@ Enable it for effects whose failure should allow dispatch to continue:
 ```python
 from typomata_redux import CancelAction, MiddlewareError, intercept_pre
 
-class Audit(Middleware[Count, Add]):
+class Audit(Middleware[Count, Add], pre_actions=Add):
     @intercept_pre(catch_exceptions=True)
     def before(self, action: Add, ctx: StoreAPI[Count, Add]) -> None:
         print("dispatching", action)  # An ordinary effect failure is logged and recovered.
@@ -482,10 +604,9 @@ All names below are exported from `typomata_redux`. `S` denotes a state type and
 | `store.get_state() -> S` | Read the current state object. |
 | `store.subscribe(listener) -> Callable[[], None]` | Register a no-argument listener and return an unsubscribe function. |
 | `FunctionReducer(function)` | Infer state typing and filter actions from function annotations; composition does this automatically. |
-| `MachineReducer[S](machine)` | Adapt optional Typomata transitions to a reducer accepting `object`. |
 | `combine_reducers(StateClass, field=reducer, ...)` | Infer the root type and compose dataclass slices. |
 | `CombinedReducer[S](StateClass, field=reducer, ...)` | Construct composition with an explicit root type. |
-| `Middleware[S, A]` | Base class for annotated middleware handlers. |
+| `Middleware[S, A]` | Annotated middleware base; declare `pre_actions`, `post_actions`, and/or `manual_actions` as class keywords for used phases. |
 | `StoreAPI[S, A]` | Context exposing `get_state` and `dispatch`. |
 | `MiddlewareContext[S, A]` | Context also exposing one-use `next`. |
 | `intercept`, `intercept_pre`, `intercept_post` | Register handlers; each accepts `catch_exceptions=False`. |
@@ -506,19 +627,20 @@ Runtime action and return-value checks can also raise `TypeError`. See
 
 - Store dispatch, context dispatch, state access, and direct function/handler calls
   retain precise static types. A narrow function body can use `assert_never` to
-  check exhaustive handling as its action union grows.
+  [check exhaustive handling](#exhaustive-action-handling) as its action union grows.
 - `FunctionReducer` infers the state type from the function signature; composition
   infers the root type from its dataclass. Heterogeneous field/reducer wiring is
   not statically linked to field names. Runtime checks use the field and function
   annotations to reject incompatible wiring.
-- `MachineReducer[S]` remains a caller declaration: the nongeneric Typomata registry
-  does not let checkers prove that transitions stay within `S`. Composition checks
-  those declarations against the field; Typomata checks actual transition results.
 - Handler action/context annotations are not statically linked to their owning
   `Middleware[S, A]`. A handler in `Middleware[Count, Add]` can incorrectly declare
   `StoreAPI[AppState, Add]` and pass mypy/Pyright, then fail reading `.count` from
   the actual `Count`. Shared aliases below reduce repetition but do not enforce
   that relationship. The known-gap fixtures keep these limits visible.
+- Phase coverage declarations validate registrations at class definition. They
+  are independent of the store/context action generic and do not close the
+  owner/context typing gaps above. Declarations are snapshotted; rebinding a union
+  alias later does not change an existing class's contract.
 - `Store[S, A]` does not inspect its generic arguments or require base-class markers.
   Untyped callers can dispatch objects outside `A`. Adapted slices treat unmatched
   actions as no-ops. A plain root function is trusted to accept the action and
@@ -543,14 +665,14 @@ CounterMiddleware: TypeAlias = Middleware[Count, CounterActions]
 CounterAPI: TypeAlias = StoreAPI[Count, CounterActions]
 CounterContext: TypeAlias = MiddlewareContext[Count, CounterActions]
 
-class ValidateAmount(CounterMiddleware):
+class ValidateAmount(CounterMiddleware, manual_actions=Add):
     @intercept
     def validate(self, action: Add, ctx: CounterContext) -> None:
         if action.amount <= 0:
             return  # Consume this action.
         ctx.next(action)
 
-class ReportCount(CounterMiddleware):
+class ReportCount(CounterMiddleware, post_actions=Add):
     @intercept_post
     def report(self, action: Add, ctx: CounterAPI) -> None:
         print(ctx.get_state().value)  # Statically typed as int.
@@ -584,9 +706,9 @@ and a handler can still accidentally use a context alias from another applicatio
   matching manual handler may forward a replacement or consume by not forwarding.
 - An annotated handler's `next` is valid once, during that invocation. Additional
   or delayed actions use `dispatch`. No batching or async dispatch API is provided.
-- Duplicate action registrations within one phase, or manual/automatic conflicts,
-  fail at class creation. Overlapping superclass
-  or union handlers raise `AmbiguousHandlerError` at dispatch. No name-order or
+- Missing coverage, handlers outside their phase vocabulary, and known same-phase
+  or manual/automatic conflicts fail at class creation. Other overlaps, including
+  later multiple-inheritance action types, raise `AmbiguousHandlerError` at dispatch. No name-order or
   most-specific-match rule is applied. A broad logger belongs in its own middleware.
 - Handlers are synchronous instance methods with three required positional
   parameters: receiver, action, and context (`MiddlewareContext[S, A]` for manual
@@ -596,7 +718,8 @@ and a handler can still accidentally use a context alias from another applicatio
   are rejected. Postponed annotations resolve in module/declaring-class scope;
   function-local forward references are not searched for automatically.
 - Inherited handlers and decorated overrides work. An undecorated override removes
-  the inherited registration. Direct calls preserve their static signatures and
+  the inherited registration; update its phase declaration if coverage changes.
+  Direct calls preserve their static signatures and
   validate action/result types; `super()` calls to registered parent methods work.
 - A reducer exception or a result rejected by the remaining runtime checks leaves
   the previous state installed.
@@ -620,33 +743,21 @@ that object remain shared: use separate instances for independently owned effect
 
 ## Development
 
-The complete development suite includes optional Typomata integration tests. Keep
-the reviewed checkout alongside this project:
-
-```text
-python/
-  typomata/
-  python-typomata-redux/
-```
+The complete development suite runs from this checkout:
 
 ```bash
 uv sync --locked
-uv pip install --no-deps ../typomata
-uv run --no-sync python -m unittest discover -s tests -v
-uv run --no-sync mypy
-uv run --no-sync pyright
-uv run --no-sync python scripts/verify_typing.py
-uv run --no-sync python scripts/verify_typing.py --fixtures tests/typing_optional
-uv run --no-sync python examples/counter.py
-uv run --no-sync python examples/typomata_counter.py
+uv run --locked python -m unittest discover -s tests -v
+uv run --locked mypy
+uv run --locked pyright
+uv run --locked python scripts/verify_typing.py
+uv run --locked python examples/counter.py
 uv build
-uv run --no-sync python scripts/verify_distribution.py
+uv run --locked python scripts/verify_distribution.py
 ```
 
-The development group contains only the type checkers. The explicit local install
-adds Typomata for integration tests; `--no-sync` keeps uv from replacing that
-separately installed dependency. Core installation and its lockfile need no sibling
-checkout. The integration dependency is absent from core package metadata.
+The development group contains only the type checkers. No sibling repository or
+state-machine package is required.
 
 `verify_typing.py` verifies valid consumers and explicit negative cases independently
 with mypy and Pyright. It copies fixtures outside the source tree, removes both
@@ -655,25 +766,31 @@ Missing or unexpected diagnostics fail. Known middleware declaration gaps are
 reported separately; if a checker starts rejecting one, verification fails so the
 fixture and documented limitation can be reviewed.
 
-Distribution verification first installs only the core wheel and verifies that
-Typomata is absent. It runs the function-first tests, example, and typing checks.
-It then installs the reviewed Typomata wheel and runs the complete runtime suite,
-integration example, and optional typing fixtures. CI runs these checks on Python
-3.10–3.14.
+Distribution verification builds a wheel from the source archive and installs it
+in a clean environment. It runs the entire runtime suite, example, and consumer
+typing checks against the installed package with Typomata absent. CI runs these
+checks on Python 3.10–3.14.
 
 ## Migrating the earlier API
 
 From the previous version of this project:
 
+- Add class keywords for each used middleware phase: `pre_actions=...`,
+  `post_actions=...`, and/or `manual_actions=...`. Use the union of actions that
+  phase is intended to handle; constructors still receive only your dependencies.
+  Missing declarations or handlers now raise `DefinitionError` at class definition.
+  Existing inherited declarations are checked after overrides, and known subclass
+  overlaps now fail during class definition instead of waiting for dispatch.
 - Plain slice functions can use their own narrow action union. Pass them directly
   to `combine_reducers`; it derives the runtime filter from the annotation.
 - Add state/action/result annotations to handwritten slices. Unannotated lambdas
   previously accepted by composition now fail at construction.
-- `BaseState` and `BaseAction` inheritance is optional for core functions, stores,
-  and middleware. Existing Typomata-based classes still work; keep those bases
-  when used by Typomata machines. Use `object` for a core handler accepting all actions.
-- Core installation no longer installs Typomata. Machine users must install the
-  integration dependency themselves. `MachineReducer[S](machine)` remains supported.
+- State and action types need no marker base classes. Existing subclasses remain
+  ordinary Python types. Use `object` for a handler accepting all actions.
+- `MachineReducer` and the built-in Typomata integration have been removed. Replace
+  adapter instances with annotated reducer functions that call your domain logic.
+  Define any state-dependent no-op behavior explicitly; direct engine calls may
+  raise for unmatched transitions. See [calling domain logic](#calling-domain-logic-from-reducers).
 - Generic state/action contracts are static. The former runtime base-class checks
   are removed; validate untyped external data explicitly.
 
@@ -683,9 +800,9 @@ factory or action-union inference from the application's slices.
 
 ## Scope
 
-The working name remains `typomata-redux`, but the core no longer depends on
-Typomata. Internal inspection describes function reducers, machine transitions,
-middleware handlers, and nested composition using dispatch's own declarations.
+The working name remains `typomata-redux`. State-machine use belongs to application
+reducers. Internal inspection describes function reducers, middleware handlers,
+and nested composition using dispatch's own declarations.
 Plain root callables and custom dispatch overrides remain opaque. Inspection does
 not execute handlers or predict side effects, and its metadata has no public
 stability guarantee. Static action-handler diagrams remain the final planned feature.

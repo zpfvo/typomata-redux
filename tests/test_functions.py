@@ -1,4 +1,4 @@
-"""Core behavior without importing or inheriting from Typomata."""
+"""Annotated function reducers with ordinary Python state and action types."""
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -240,12 +240,12 @@ class FunctionTests(unittest.TestCase):
 
     def test_plain_actions_and_injected_middleware_work_without_markers(self):
         records = []
-        class Validate(Middleware[Root, Actions]):
+        class Validate(Middleware[Root, Actions], pre_actions=Add):
             @intercept_pre
             def before(self, action: Add, ctx: API) -> None:
                 if action.amount < 0:
                     raise CancelAction()
-        class Effect(Middleware[Root, Actions]):
+        class Effect(Middleware[Root, Actions], post_actions=Add):
             def __init__(self, database):
                 self.database = database
             @intercept_post

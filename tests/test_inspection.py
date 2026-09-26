@@ -3,26 +3,25 @@ from __future__ import annotations
 from dataclasses import FrozenInstanceError, dataclass
 import unittest
 
-from typomata import BaseAction, BaseState, BaseStateMachine, transition
 from typomata_redux import (
-    AmbiguousHandlerError, CombinedReducer, MachineReducer, Middleware, Store,
+    AmbiguousHandlerError, CombinedReducer, FunctionReducer, Middleware, Store,
     StoreAPI, combine_reducers, intercept, intercept_post, intercept_pre,
 )
 from typomata_redux._inspection import describe_middleware, describe_reducer, describe_store
-from test_redux import Actions, Add, Context, Finished, Ignore, State, adapter, store
+from test_redux import Actions, Add, Context, Finished, Foreign, Ignore, State, adapter, counter, store
 
 API = StoreAPI[State, Actions]
 
 
 @dataclass(frozen=True)
-class Pair(BaseState):
+class Pair:
     left: State = State()
     right: State = State()
     label: str = 'retained'
 
 
 @dataclass(frozen=True)
-class Root(BaseState):
+class Root:
     pair: Pair = Pair()
     count: State = State()
 
@@ -31,7 +30,7 @@ class InspectionTests(unittest.TestCase):
     def test_store_order_duplicates_and_inspection_without_execution(self):
         calls = []
 
-        class Observe(Middleware[State, Actions]):
+        class Observe(Middleware[State, Actions], pre_actions=Add, post_actions=Actions):
             @intercept_pre(catch_exceptions=True)
             def before(self, action: Add, ctx: API) -> None:
                 calls.append('pre')
@@ -89,24 +88,21 @@ class InspectionTests(unittest.TestCase):
         self.assertEqual(info.fields[1].reducer.transitions[0].actions, (Add,))
         self.assertEqual(reducer(Root(), Add(2)).pair, Pair(State(2), State(2)))
 
-    def test_transition_unions_and_snapshot_match_runtime(self):
-        class Machine(BaseStateMachine):
-            @transition
-            def handle(self, state: State | Finished, action: Actions) -> State | Finished:
-                if isinstance(action, Add):
-                    return Finished(state.value + action.amount)
-                return state
+    def test_function_unions_and_snapshot_match_runtime(self):
+        calls = []
 
-        machine = Machine()
-        reducer = MachineReducer[State | Finished](machine)
-        # Inspection must reuse the adapter's validated snapshot, not reread a
-        # machine's registry or annotations after dispatch was configured.
-        def changed_registry():
-            raise AssertionError('registry read again')
-        machine.transition_map = changed_registry
+        def handle(state: State | Finished, action: Actions) -> State | Finished:
+            calls.append(action)
+            if isinstance(action, Add):
+                return Finished(state.value + action.amount)
+            return state
+
+        reducer = FunctionReducer(handle)
+        # Inspection and runtime dispatch share the original annotation snapshot.
+        handle.__annotations__['action'] = object
         info = describe_reducer(reducer)
-        self.assertEqual(info.kind, 'machine')
-        self.assertTrue(info.name.endswith('.Machine'))
+        self.assertEqual(info.kind, 'function')
+        self.assertTrue(info.name.endswith('.handle'))
         self.assertEqual(len(info.transitions), 1)
         handler = info.transitions[0]
         self.assertEqual(handler.sources, (State, Finished))
@@ -115,9 +111,11 @@ class InspectionTests(unittest.TestCase):
         self.assertEqual(reducer(State(), Add(4)), Finished(4))
         previous = Finished(4)
         self.assertIs(reducer(previous, Ignore()), previous)
+        self.assertIs(reducer(previous, Foreign()), previous)
+        self.assertEqual(len(calls), 2)
 
     def test_inheritance_override_and_unregistered_method(self):
-        class Parent(Middleware[State, Actions]):
+        class Parent(Middleware[State, Actions], manual_actions=Add):
             @intercept
             def handle(self, action: Add, ctx: Context) -> None:
                 ctx.next(action)
@@ -125,12 +123,12 @@ class InspectionTests(unittest.TestCase):
         class Inherited(Parent):
             pass
 
-        class Override(Parent):
+        class Override(Parent, manual_actions=Ignore):
             @intercept(catch_exceptions=True)
             def handle(self, action: Ignore, ctx: Context) -> None:
                 pass
 
-        class Removed(Parent):
+        class Removed(Parent, manual_actions=None):
             def handle(self, action: Add, ctx: Context) -> None:
                 pass
 
@@ -150,33 +148,31 @@ class InspectionTests(unittest.TestCase):
         self.assertEqual(subject.get_state(), State(1))
 
     def test_ambiguity_is_described_without_selecting_a_winner(self):
-        class Overlap(Middleware[State, Actions]):
+        class Overlap(Middleware[State, Actions], pre_actions=Actions):
             @intercept_pre
-            def broad(self, action: BaseAction, ctx: API) -> None:
+            def broad(self, action: Ignore, ctx: API) -> None:
                 raise AssertionError('must not execute')
 
             @intercept_pre
             def specific(self, action: Add, ctx: API) -> None:
                 raise AssertionError('must not execute')
 
-        handlers = describe_middleware(Overlap()).handlers
-        self.assertEqual([item.actions for item in handlers], [(BaseAction,), (Add,)])
-        with self.assertRaises(AmbiguousHandlerError):
-            store(Overlap()).dispatch(Add())
-
-    def test_empty_declarations_are_distinct_from_opaque_callables(self):
-        class Empty(BaseStateMachine):
+        class Both(Add, Ignore):
             pass
 
-        machine = describe_reducer(MachineReducer[State](Empty()))
+        handlers = describe_middleware(Overlap()).handlers
+        self.assertEqual([item.actions for item in handlers], [(Ignore,), (Add,)])
+        with self.assertRaises(AmbiguousHandlerError):
+            store(Overlap()).dispatch(Both())
+
+    def test_empty_declarations_are_distinct_from_opaque_callables(self):
         combined = describe_reducer(combine_reducers(Pair))
         middleware = describe_middleware(Middleware())
-        self.assertEqual((machine.kind, machine.transitions), ('machine', ()))
         self.assertEqual((combined.kind, combined.fields), ('combined', ()))
         self.assertEqual((middleware.kind, middleware.handlers), ('annotated', ()))
 
     def test_custom_dispatch_overrides_are_opaque(self):
-        class CustomMachine(MachineReducer[State]):
+        class CustomFunction(FunctionReducer[State]):
             def __call__(self, state, action):
                 return state
 
@@ -184,7 +180,7 @@ class InspectionTests(unittest.TestCase):
             def __call__(self, state, action):
                 return state
 
-        class CustomMiddleware(Middleware[State, Actions]):
+        class CustomMiddleware(Middleware[State, Actions], pre_actions=Add):
             @intercept_pre
             def before(self, action: Add, ctx: API) -> None:
                 raise AssertionError('not used by custom dispatch')
@@ -192,10 +188,7 @@ class InspectionTests(unittest.TestCase):
             def __call__(self, api, next_dispatch):
                 return next_dispatch
 
-        class Empty(BaseStateMachine):
-            pass
-
-        self.assertEqual(describe_reducer(CustomMachine(Empty())).kind, 'opaque')
+        self.assertEqual(describe_reducer(CustomFunction(counter)).kind, 'opaque')
         self.assertEqual(describe_reducer(CustomCombined(Pair)).kind, 'opaque')
         info = describe_middleware(CustomMiddleware())
         self.assertEqual(info.kind, 'opaque')
@@ -204,7 +197,7 @@ class InspectionTests(unittest.TestCase):
     def test_descriptions_are_immutable_and_do_not_expose_effect_objects(self):
         dependency = object()
 
-        class Effect(Middleware[State, Actions]):
+        class Effect(Middleware[State, Actions], pre_actions=Add):
             def __init__(self):
                 self.database = dependency
 
@@ -224,7 +217,7 @@ class InspectionTests(unittest.TestCase):
         self.assertIsInstance(info.reducer.transitions, tuple)
 
     def test_reducer_inspection_does_not_predict_consumption(self):
-        class Consume(Middleware[State, Actions]):
+        class Consume(Middleware[State, Actions], manual_actions=Add):
             @intercept
             def handle(self, action: Add, ctx: Context) -> None:
                 pass

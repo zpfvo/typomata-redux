@@ -3,7 +3,7 @@ from typomata_redux import Middleware, Store, StoreAPI, intercept_pre
 from consumer import Actions, Count, Foreign, plain_counter
 
 
-class WrongAction(Middleware[Count, Actions]):
+class WrongAction(Middleware[Count, Actions], pre_actions=Foreign):
     @intercept_pre
     def before(self, action: Foreign, ctx: StoreAPI[Count, Actions]) -> None:
         pass

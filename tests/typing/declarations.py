@@ -11,7 +11,7 @@ class StringAction(Middleware[Count, str]):
     pass
 
 
-class BadReturns(Middleware[Count, Actions]):
+class BadReturns(Middleware[Count, Actions], manual_actions=Add, pre_actions=Add, post_actions=Add):
     @intercept  # type: ignore[arg-type]  # pyright: ignore[reportArgumentType, reportCallIssue]
     def manual(self, action: Add, ctx: MiddlewareContext[Count, Actions]) -> int:
         return 1
@@ -25,7 +25,7 @@ class BadReturns(Middleware[Count, Actions]):
         pass
 
 
-class BadConfiguration(Middleware[Count, Actions]):
+class BadConfiguration(Middleware[Count, Actions], pre_actions=Add):
     @intercept_pre(catch_exceptions='yes')  # type: ignore[call-overload, untyped-decorator]  # pyright: ignore[reportArgumentType]
     def before(self, action: Add, ctx: StoreAPI[Count, Actions]) -> None:
         pass

@@ -37,10 +37,16 @@ class FieldInfo:
 @dataclass(frozen=True)
 class ReducerInfo:
     name: str
-    kind: Literal["function", "machine", "combined", "opaque"]
+    kind: Literal["function", "combined", "opaque"]
     transitions: tuple[TransitionInfo, ...] = ()
     state_type: type | None = None
     fields: tuple[FieldInfo, ...] = ()
+
+
+@dataclass(frozen=True)
+class PhaseCoverage:
+    phase: Phase
+    actions: tuple[type, ...]
 
 
 @dataclass(frozen=True)
@@ -48,6 +54,7 @@ class MiddlewareInfo:
     name: str
     kind: Literal["annotated", "opaque"]
     handlers: tuple[InterceptorInfo, ...] = ()
+    coverage: tuple[PhaseCoverage, ...] = ()
 
 
 @dataclass(frozen=True)
